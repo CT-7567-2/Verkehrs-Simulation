@@ -336,6 +336,42 @@
   #reset-btn:active { transform: translateY(1px); }
   #reset-btn:focus-visible { outline: 2px solid var(--text); outline-offset: 3px; }
 
+  .element-buttons {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+  }
+
+  .place-btn {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12.5px;
+    color: var(--text);
+    background: #1a1f26;
+    border: 1px solid var(--panel-border);
+    border-radius: 8px;
+    padding: 10px 14px;
+    cursor: pointer;
+    transition: background 0.12s ease, border-color 0.12s ease;
+  }
+  .place-btn:hover { background: #232a33; }
+  .place-btn.active {
+    background: var(--marking);
+    color: #0b0f14;
+    border-color: var(--marking);
+    font-weight: 700;
+  }
+  .place-btn:focus-visible { outline: 2px solid var(--marking); outline-offset: 2px; }
+
+  .element-hint {
+    color: var(--text-muted);
+    font-size: 12px;
+    line-height: 1.5;
+    max-width: 420px;
+    margin: 0;
+    flex: 1 1 260px;
+  }
+
   footer {
     max-width: 960px;
     width: 100%;
@@ -351,12 +387,11 @@
 <body>
 <div class="page">
   <header>
-    <p class="eyebrow">Prototyp · 01</p>
-    <h1>Ein Fahrzeug antippen, den Verkehr verändern</h1>
+    <p class="eyebrow">Prototyp · 02</p>
+    <h1>Ampeln, Vorfahrt und echter Rechtsverkehr</h1>
     <p class="subtitle">
-      Fahrzeuge auf einer geschlossenen Ringstraße, simuliert mit dem <em>Intelligent Driver Model</em>.
-      Klicke auf ein Fahrzeug und bremse es, ändere seine Richtgeschwindigkeit oder seinen
-      Sicherheitsabstand — und beobachte, wie sich das auf den Verkehr dahinter auswirkt.
+      Fahrzeuge fahren jetzt auf der rechten Fahrbahnhälfte statt mittig. Platziere Ampeln und
+      Vorfahrtsschilder frei auf der Strecke — Ampeln schaltest du manuell per Klick zwischen Rot und Grün.
     </p>
   </header>
 
@@ -416,12 +451,30 @@
     <button id="reset-btn">Simulation neu starten</button>
   </div>
 
+  <div class="controls">
+    <div class="control">
+      <label>Streckenelemente</label>
+      <div class="element-buttons">
+        <button id="place-light-btn" class="place-btn">🚦 Ampel platzieren</button>
+        <button id="place-sign-btn" class="place-btn">🔶 Vorfahrtsschild platzieren</button>
+        <button id="clear-elements-btn" class="inspector-link" style="margin-top:2px;">Alle Elemente entfernen</button>
+      </div>
+    </div>
+    <p class="element-hint" id="element-hint">
+      Klicke auf die Straße, um zu platzieren. Klicke ein vorhandenes Element an, um es zu entfernen.
+      Außerhalb des Platzierungsmodus schaltet ein Klick auf eine Ampel sie zwischen Rot und Grün um.
+    </p>
+  </div>
+
   <footer>
     <strong>Was hier passiert:</strong> Jedes Fahrzeug reagiert nur auf den Abstand und die Geschwindigkeit
-    des Vordermanns (IDM-Formel von Treiber et al.). Es gibt keine zentrale Steuerung. Wähle ein Fahrzeug aus
-    und greife manuell ein — schon ein kurzes Bremsen oder ein spürbar niedrigerer Sicherheitsabstand reicht,
-    damit sich eine sich selbst erhaltende Stauwelle bildet, die entgegen der Fahrtrichtung wandert.
-    Das ist der klassische „Phantomstau".
+    des Vordermanns oder einer roten Ampel (IDM-Formel von Treiber et al.). Es gibt keine zentrale Steuerung.
+    Wähle ein Fahrzeug aus und greife manuell ein, oder platziere Ampeln auf der Strecke — beides reicht,
+    damit sich eine sich selbst erhaltende Stauwelle bildet. Das ist der klassische „Phantomstau".
+    <br><br>
+    <strong>Hinweis zu Vorfahrtsschildern:</strong> Sie lassen sich schon platzieren, wirken aber noch nicht
+    auf den Verkehr — echte Vorfahrtsregeln ergeben erst mit richtigen Kreuzungen Sinn, die mit dem
+    geplanten Straßennetz-Editor dazukommen.
   </footer>
 </div>
 
@@ -438,6 +491,24 @@
 
   const offsetX = (canvas.width - (2 * RADIUS + STRAIGHT)) / 2;
   const offsetY = (canvas.height - 2 * RADIUS) / 2;
+
+  // How far vehicles sit from the centerline, toward the right-hand side of
+  // their direction of travel (right-hand traffic), plus how far roadside
+  // furniture (lights, signs) sits beyond the road edge on the same side.
+  const LANE_OFFSET = ROAD_WIDTH * 0.27;
+  const ROADSIDE_OFFSET = ROAD_WIDTH / 2 + 16;
+
+  // Perpendicular unit vector pointing to the right of the direction of
+  // travel `heading`, in screen/canvas coordinates.
+  function rightOf(heading) {
+    return { x: Math.sin(heading), y: -Math.cos(heading) };
+  }
+
+  function laneOffsetPoint(s, offsetAmount) {
+    const p = trackPoint(s);
+    const r = rightOf(p.heading);
+    return { x: p.x + r.x * offsetAmount, y: p.y + r.y * offsetAmount, heading: p.heading };
+  }
 
   // Returns {x, y, heading} for arc-length position s along the loop.
   function trackPoint(s) {
@@ -510,6 +581,34 @@
   let selectedIndex = null;
   let brakingIndex = null;
 
+  // ---------- Road furniture: traffic lights & right-of-way signs ----------
+  // Both persist across "Simulation neu starten" (that only re-rolls the
+  // vehicles), and are cleared only via the explicit "Alle Elemente
+  // entfernen" button.
+  let trafficLights = [];   // { s: arc-length position, state: 'red' | 'green' }
+  let yieldSigns = [];      // { s: arc-length position } — visual only for now
+  let placementMode = null; // null | 'light' | 'sign'
+
+  // Precomputed samples along the track, used to snap a click to the
+  // nearest point on the road (so placed elements sit exactly on the path).
+  const TRACK_SAMPLES = [];
+  (function buildTrackSamples() {
+    const STEP = 4;
+    for (let s = 0; s < TRACK_LENGTH; s += STEP) {
+      const p = trackPoint(s);
+      TRACK_SAMPLES.push({ s, x: p.x, y: p.y });
+    }
+  })();
+
+  function nearestTrackPos(x, y) {
+    let best = null, bestDist = Infinity;
+    for (const sample of TRACK_SAMPLES) {
+      const d = Math.hypot(sample.x - x, sample.y - y);
+      if (d < bestDist) { bestDist = d; best = sample.s; }
+    }
+    return best;
+  }
+
   function recomputeV0(v) {
     v.v0 = Math.max(3, BASE_V0_KMH * v.v0Factor + v.v0DeltaKmh) / 3.6;
   }
@@ -580,22 +679,35 @@
   function step(dt) {
     simTime += dt;
 
-    // Determine who is physically ahead of whom *right now*, rather than
-    // trusting a fixed array-index order. This is what makes the simulation
-    // self-correct: even if two vehicles ever end up overlapping for an
-    // instant, everyone still reacts to whoever is actually in front of them.
-    const order = [];
-    for (let i = 0; i < N; i++) order.push(i);
-    order.sort((a, b) => vehicles[a].pos - vehicles[b].pos);
+    // Build a combined list of everything that can act as a "leader" a real
+    // vehicle might have to follow: every other vehicle, plus a zero-length,
+    // zero-speed virtual obstacle for every currently red traffic light.
+    // Green lights simply don't appear in this list, so vehicles fall back
+    // to following the next real vehicle ahead once a light turns green.
+    const entities = vehicles.map((v, i) => ({ kind: 'car', idx: i, pos: v.pos, speed: v.speed, length: v.length }));
+    for (const light of trafficLights) {
+      if (light.state === 'red') {
+        entities.push({ kind: 'light', pos: light.s, speed: 0, length: 0 });
+      }
+    }
 
-    const leaderIndex = new Array(N);
-    for (let k = 0; k < N; k++) {
-      leaderIndex[order[k]] = order[(k + 1) % N];
+    entities.sort((a, b) => a.pos - b.pos);
+    const M = entities.length;
+
+    // For each real vehicle, find the closest entity ahead of it (car or red light).
+    const leaderOf = new Array(N);
+    const entityByCarIdx = new Array(N);
+    for (let k = 0; k < M; k++) {
+      if (entities[k].kind === 'car') entityByCarIdx[entities[k].idx] = k;
+    }
+    for (let i = 0; i < N; i++) {
+      const k = entityByCarIdx[i];
+      leaderOf[i] = entities[(k + 1) % M];
     }
 
     const accels = new Array(N);
     for (let i = 0; i < N; i++) {
-      accels[i] = idmAccel(vehicles[i], vehicles[leaderIndex[i]]);
+      accels[i] = idmAccel(vehicles[i], leaderOf[i]);
     }
     if (brakingIndex !== null && vehicles[brakingIndex]) {
       // Driver actively holds the brake — overrides the car-following model
@@ -610,11 +722,10 @@
 
     // Defensive safety net: even with the corrected physics above, extreme
     // parameter combinations (very low safety gap + very hard braking) could
-    // theoretically still overlap for a frame. Never allow a visible pass-through.
-    for (let k = 0; k < N; k++) {
-      const i = order[k];
-      const leader = vehicles[leaderIndex[i]];
-      if (leaderIndex[i] === i) continue;
+    // theoretically still overlap for a frame. Never allow a visible pass-through
+    // — this applies equally to real leader vehicles and red-light stop lines.
+    for (let i = 0; i < N; i++) {
+      const leader = leaderOf[i];
       const gap = signedGap(vehicles[i], leader);
       if (gap < 0) {
         vehicles[i].pos = ((leader.pos - leader.length - 0.1) % TRACK_LENGTH + TRACK_LENGTH) % TRACK_LENGTH;
@@ -669,10 +780,10 @@
     ctx.stroke();
     ctx.setLineDash([]);
 
-    // vehicles
+    // vehicles — offset to the right-hand lane, not centered on the road
     for (let i = 0; i < vehicles.length; i++) {
       const v = vehicles[i];
-      const { x, y, heading } = trackPoint(v.pos);
+      const { x, y, heading } = laneOffsetPoint(v.pos, LANE_OFFSET);
 
       if (i === selectedIndex) {
         ctx.save();
@@ -699,6 +810,55 @@
       } else {
         ctx.rect(-CAR_LENGTH / 2, -CAR_WIDTH / 2, CAR_LENGTH, CAR_WIDTH);
       }
+      ctx.fill();
+      ctx.restore();
+    }
+
+    // yield / right-of-way signs (visual only for now — see footer note)
+    for (const sign of yieldSigns) {
+      const { x, y } = laneOffsetPoint(sign.s, ROADSIDE_OFFSET);
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.shadowColor = '#000';
+      ctx.shadowBlur = 3;
+      ctx.fillStyle = '#f5c518';
+      ctx.strokeStyle = '#1a1300';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      const r = 9;
+      ctx.moveTo(0, -r);
+      ctx.lineTo(r, 0);
+      ctx.lineTo(0, r);
+      ctx.lineTo(-r, 0);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    // traffic lights (click to toggle red/green manually)
+    for (const light of trafficLights) {
+      const { x, y } = laneOffsetPoint(light.s, ROADSIDE_OFFSET);
+      ctx.save();
+      ctx.translate(x, y);
+      // pole
+      ctx.fillStyle = '#3a4048';
+      ctx.fillRect(-2, -2, 4, 16);
+      // housing
+      ctx.fillStyle = '#12171d';
+      ctx.strokeStyle = '#2a313b';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.roundRect ? ctx.roundRect(-6, -16, 12, 16, 3) : ctx.rect(-6, -16, 12, 16);
+      ctx.fill();
+      ctx.stroke();
+      // light
+      const isRed = light.state === 'red';
+      ctx.fillStyle = isRed ? '#ef4444' : '#22c55e';
+      ctx.shadowColor = ctx.fillStyle;
+      ctx.shadowBlur = 8;
+      ctx.beginPath();
+      ctx.arc(0, isRed ? -11.5 : -4.5, 3.4, 0, Math.PI * 2);
       ctx.fill();
       ctx.restore();
     }
@@ -775,6 +935,16 @@
   });
 
   // ---------- Vehicle selection & manual intervention ----------
+  function hitTestList(list, x, y, offsetAmount, radius) {
+    let nearest = -1, nearestDist = Infinity;
+    for (let i = 0; i < list.length; i++) {
+      const p = laneOffsetPoint(list[i].s, offsetAmount);
+      const d = Math.hypot(p.x - x, p.y - y);
+      if (d < nearestDist) { nearestDist = d; nearest = i; }
+    }
+    return nearestDist < radius ? nearest : -1;
+  }
+
   canvas.addEventListener('click', (e) => {
     const rect = canvas.getBoundingClientRect();
     const scaleX = canvas.width / rect.width;
@@ -782,10 +952,45 @@
     const clickX = (e.clientX - rect.left) * scaleX;
     const clickY = (e.clientY - rect.top) * scaleY;
 
+    if (placementMode === 'light') {
+      const hitIdx = hitTestList(trafficLights, clickX, clickY, ROADSIDE_OFFSET, 16);
+      if (hitIdx !== -1) {
+        trafficLights.splice(hitIdx, 1);
+      } else {
+        const s = nearestTrackPos(clickX, clickY);
+        if (s !== null) trafficLights.push({ s, state: 'red' });
+      }
+      return;
+    }
+
+    if (placementMode === 'sign') {
+      const hitIdx = hitTestList(yieldSigns, clickX, clickY, ROADSIDE_OFFSET, 16);
+      if (hitIdx !== -1) {
+        yieldSigns.splice(hitIdx, 1);
+      } else {
+        const s = nearestTrackPos(clickX, clickY);
+        if (s !== null) yieldSigns.push({ s });
+      }
+      return;
+    }
+
+    // Normal mode: clicking an existing light toggles it red/green.
+    const lightIdx = hitTestList(trafficLights, clickX, clickY, ROADSIDE_OFFSET, 16);
+    if (lightIdx !== -1) {
+      trafficLights[lightIdx].state = trafficLights[lightIdx].state === 'red' ? 'green' : 'red';
+      return;
+    }
+
+    // Clicking a sign currently does nothing functional — consume the click
+    // so it doesn't accidentally select a distant vehicle instead.
+    const signIdx = hitTestList(yieldSigns, clickX, clickY, ROADSIDE_OFFSET, 16);
+    if (signIdx !== -1) return;
+
+    // Otherwise, select the nearest vehicle (vehicles render on the right lane).
     let nearest = null;
     let nearestDist = Infinity;
     for (let i = 0; i < vehicles.length; i++) {
-      const { x, y } = trackPoint(vehicles[i].pos);
+      const { x, y } = laneOffsetPoint(vehicles[i].pos, LANE_OFFSET);
       const d = Math.hypot(x - clickX, y - clickY);
       if (d < nearestDist) {
         nearestDist = d;
@@ -794,6 +999,25 @@
     }
     selectedIndex = (nearest !== null && nearestDist < 26) ? nearest : null;
     updateInspector();
+  });
+
+  // ---------- Placement mode toggles ----------
+  const placeLightBtn = document.getElementById('place-light-btn');
+  const placeSignBtn = document.getElementById('place-sign-btn');
+
+  placeLightBtn.addEventListener('click', () => {
+    placementMode = placementMode === 'light' ? null : 'light';
+    placeLightBtn.classList.toggle('active', placementMode === 'light');
+    placeSignBtn.classList.remove('active');
+  });
+  placeSignBtn.addEventListener('click', () => {
+    placementMode = placementMode === 'sign' ? null : 'sign';
+    placeSignBtn.classList.toggle('active', placementMode === 'sign');
+    placeLightBtn.classList.remove('active');
+  });
+  document.getElementById('clear-elements-btn').addEventListener('click', () => {
+    trafficLights = [];
+    yieldSigns = [];
   });
 
   document.getElementById('brake-btn').addEventListener('pointerdown', (e) => {
