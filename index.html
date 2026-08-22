@@ -376,7 +376,7 @@
       <div class="legend-title">Fahrzeugtempo</div>
       <div class="gradient-bar"></div>
       <div class="gradient-labels">
-        <span>gebremst</span><span>frei</span>
+        <span>0 km/h</span><span id="legend-max">— km/h</span>
       </div>
     </div>
 
@@ -528,6 +528,7 @@
         v0Factor: v0Factor,
         v0DeltaKmh: 0,
         v0: baseV0 * v0Factor,
+        s0Percent: 0,           // relative deviation from default safety gap, in %
         s0: IDM.s0,
         length: IDM.vehicleLength
       };
@@ -537,7 +538,12 @@
     selectedIndex = null;
     brakingIndex = null;
     simTime = 0;
+    updateLegend();
     updateInspector();
+  }
+
+  function recomputeS0(v) {
+    v.s0 = Math.max(0.5, IDM.s0 * (1 + v.s0Percent / 100));
   }
 
   function applySpeedLimit(limitKmh) {
@@ -545,13 +551,28 @@
     for (const v of vehicles) {
       recomputeV0(v);
     }
+    updateLegend();
+  }
+
+  // Shortest signed distance on the ring: positive if `leader` is ahead of
+  // `v` along the driving direction, negative if they already overlap.
+  // (A plain modulo gap breaks down right at the moment of a near-collision:
+  // a tiny negative raw gap would wrap around to "almost a full lap of free
+  // road", which is exactly what let vehicles drive straight through each
+  // other during hard braking.)
+  function signedGap(v, leader) {
+    let raw = leader.pos - v.pos - leader.length;
+    const half = TRACK_LENGTH / 2;
+    while (raw > half) raw -= TRACK_LENGTH;
+    while (raw < -half) raw += TRACK_LENGTH;
+    return raw;
   }
 
   function idmAccel(v, leader) {
-    const gap = ((leader.pos - v.pos - leader.length) % TRACK_LENGTH + TRACK_LENGTH) % TRACK_LENGTH;
+    const gap = signedGap(v, leader);
     const dv = v.speed - leader.speed;
     const sStar = v.s0 + Math.max(0, v.speed * IDM.T + (v.speed * dv) / (2 * Math.sqrt(IDM.a * IDM.b)));
-    const safeGap = Math.max(gap, 0.15);
+    const safeGap = Math.max(gap, 0.1); // floor avoids div-by-zero/negative, forces max braking when very close
     let accel = IDM.a * (1 - Math.pow(v.speed / v.v0, IDM.delta) - Math.pow(sStar / safeGap, 2));
     return Math.max(-8, Math.min(IDM.a, accel));
   }
@@ -559,10 +580,22 @@
   function step(dt) {
     simTime += dt;
 
+    // Determine who is physically ahead of whom *right now*, rather than
+    // trusting a fixed array-index order. This is what makes the simulation
+    // self-correct: even if two vehicles ever end up overlapping for an
+    // instant, everyone still reacts to whoever is actually in front of them.
+    const order = [];
+    for (let i = 0; i < N; i++) order.push(i);
+    order.sort((a, b) => vehicles[a].pos - vehicles[b].pos);
+
+    const leaderIndex = new Array(N);
+    for (let k = 0; k < N; k++) {
+      leaderIndex[order[k]] = order[(k + 1) % N];
+    }
+
     const accels = new Array(N);
     for (let i = 0; i < N; i++) {
-      const leader = vehicles[(i + 1) % N];
-      accels[i] = idmAccel(vehicles[i], leader);
+      accels[i] = idmAccel(vehicles[i], vehicles[leaderIndex[i]]);
     }
     if (brakingIndex !== null && vehicles[brakingIndex]) {
       // Driver actively holds the brake — overrides the car-following model
@@ -574,10 +607,25 @@
       v.speed = Math.max(0, v.speed + accels[i] * dt);
       v.pos = (v.pos + v.speed * dt) % TRACK_LENGTH;
     }
+
+    // Defensive safety net: even with the corrected physics above, extreme
+    // parameter combinations (very low safety gap + very hard braking) could
+    // theoretically still overlap for a frame. Never allow a visible pass-through.
+    for (let k = 0; k < N; k++) {
+      const i = order[k];
+      const leader = vehicles[leaderIndex[i]];
+      if (leaderIndex[i] === i) continue;
+      const gap = signedGap(vehicles[i], leader);
+      if (gap < 0) {
+        vehicles[i].pos = ((leader.pos - leader.length - 0.1) % TRACK_LENGTH + TRACK_LENGTH) % TRACK_LENGTH;
+        vehicles[i].speed = Math.min(vehicles[i].speed, leader.speed);
+      }
+    }
   }
 
-  function speedColor(speed, v0) {
-    const ratio = Math.max(0, Math.min(1, speed / v0));
+  function speedColor(speedMs) {
+    const maxRefMs = (BASE_V0_KMH + 15) / 3.6;
+    const ratio = Math.max(0, Math.min(1, speedMs / maxRefMs));
     // red -> amber -> green
     let r, g, b;
     if (ratio < 0.5) {
@@ -642,7 +690,7 @@
       ctx.save();
       ctx.translate(x, y);
       ctx.rotate(heading);
-      ctx.fillStyle = speedColor(v.speed, v.v0);
+      ctx.fillStyle = speedColor(v.speed);
       ctx.shadowColor = ctx.fillStyle;
       ctx.shadowBlur = 6;
       ctx.beginPath();
@@ -654,6 +702,11 @@
       ctx.fill();
       ctx.restore();
     }
+  }
+
+  function updateLegend() {
+    const el = document.getElementById('legend-max');
+    if (el) el.textContent = (BASE_V0_KMH + 15) + ' km/h';
   }
 
   function updateHud() {
@@ -684,7 +737,8 @@
     document.getElementById('insp-id').textContent = '#' + (selectedIndex + 1);
     document.getElementById('insp-speed').textContent = (v.speed * 3.6).toFixed(0) + ' km/h';
     document.getElementById('insp-v0').textContent = (v.v0 * 3.6).toFixed(0) + ' km/h';
-    document.getElementById('insp-s0').textContent = v.s0.toFixed(1) + ' m';
+    document.getElementById('insp-s0').textContent =
+      (v.s0Percent > 0 ? '+' : '') + v.s0Percent + '% (' + v.s0.toFixed(1) + ' m)';
   }
 
   let lastT = null;
@@ -774,13 +828,15 @@
   document.getElementById('gap-up').addEventListener('click', () => {
     if (selectedIndex === null) return;
     const v = vehicles[selectedIndex];
-    v.s0 = Math.min(20, v.s0 + 1);
+    v.s0Percent = Math.min(200, v.s0Percent + 10);
+    recomputeS0(v);
     updateInspector();
   });
   document.getElementById('gap-down').addEventListener('click', () => {
     if (selectedIndex === null) return;
     const v = vehicles[selectedIndex];
-    v.s0 = Math.max(0.5, v.s0 - 1);
+    v.s0Percent = Math.max(-80, v.s0Percent - 10);
+    recomputeS0(v);
     updateInspector();
   });
 
