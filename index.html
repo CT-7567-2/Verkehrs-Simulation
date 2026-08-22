@@ -166,6 +166,96 @@
     letter-spacing: 0.02em;
   }
 
+  .controls {
+    width: 100%;
+    max-width: 960px;
+    margin-top: 16px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: 24px;
+    background: var(--panel-bg);
+    border: 1px solid var(--panel-border);
+    border-radius: 12px;
+    padding: 18px 22px;
+  }
+
+  .control {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-width: 220px;
+    flex: 1;
+  }
+
+  .control label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11.5px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    display: flex;
+    justify-content: space-between;
+  }
+
+  .control label .val {
+    color: var(--marking);
+    font-weight: 700;
+  }
+
+  .control input[type="range"] {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 100%;
+    height: 4px;
+    border-radius: 2px;
+    background: var(--road-edge);
+    outline: none;
+  }
+
+  .control input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--marking);
+    cursor: pointer;
+    border: 2px solid #0b0f14;
+  }
+
+  .control input[type="range"]::-moz-range-thumb {
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--marking);
+    cursor: pointer;
+    border: 2px solid #0b0f14;
+  }
+
+  .control input[type="range"]:focus-visible {
+    outline: 2px solid var(--marking);
+    outline-offset: 4px;
+  }
+
+  #reset-btn {
+    font-family: 'Space Grotesk', sans-serif;
+    font-weight: 600;
+    font-size: 14px;
+    color: #0b0f14;
+    background: var(--marking);
+    border: none;
+    border-radius: 8px;
+    padding: 12px 22px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: transform 0.12s ease, filter 0.12s ease;
+  }
+
+  #reset-btn:hover { filter: brightness(1.08); }
+  #reset-btn:active { transform: translateY(1px); }
+  #reset-btn:focus-visible { outline: 2px solid var(--text); outline-offset: 3px; }
+
   footer {
     max-width: 960px;
     width: 100%;
@@ -184,7 +274,7 @@
     <p class="eyebrow">Prototyp · 01</p>
     <h1>Wie ein einzelnes Bremsmanöver zum Stau wird</h1>
     <p class="subtitle">
-      22 Fahrzeuge auf einer geschlossenen Ringstraße, simuliert mit dem <em>Intelligent Driver Model</em>.
+      Fahrzeuge auf einer geschlossenen Ringstraße, simuliert mit dem <em>Intelligent Driver Model</em>.
       Kein Unfall, keine Ampel, keine Baustelle — nur ein kurzes Antippen der Bremse reicht,
       damit sich eine Stauwelle rückwärts durch den Verkehr schiebt.
     </p>
@@ -196,7 +286,7 @@
     <div class="hud">
       <div class="hud-row"><span class="label">Ø Geschwindigkeit</span><span class="value" id="hud-avg">—</span></div>
       <div class="hud-row"><span class="label">Min. Geschwindigkeit</span><span class="value" id="hud-min">—</span></div>
-      <div class="hud-row"><span class="label">Im Stau (&lt; 30 km/h)</span><span class="value" id="hud-jam">—</span></div>
+      <div class="hud-row"><span class="label" id="hud-jam-label">Im Stau</span><span class="value" id="hud-jam">—</span></div>
       <div class="hud-row"><span class="label">Simulationszeit</span><span class="value" id="hud-time">—</span></div>
     </div>
 
@@ -208,7 +298,19 @@
       </div>
     </div>
 
-    <div class="note">Nicht interaktiv — reiner Beobachtungs-Prototyp. Steuerbare Version folgt.</div>
+    <div class="note">Werte anpassen und „Simulation neu starten" drücken, um sie mit den neuen Parametern zu sehen.</div>
+  </div>
+
+  <div class="controls">
+    <div class="control">
+      <label for="count-slider">Anzahl Fahrzeuge <span class="val" id="count-val">22</span></label>
+      <input type="range" id="count-slider" min="4" max="45" step="1" value="22">
+    </div>
+    <div class="control">
+      <label for="limit-slider">Tempolimit <span class="val" id="limit-val">90 km/h</span></label>
+      <input type="range" id="limit-slider" min="30" max="150" step="5" value="90">
+    </div>
+    <button id="reset-btn">Simulation neu starten</button>
   </div>
 
   <footer>
@@ -291,22 +393,32 @@
     vehicleLength: 5.2
   };
 
-  const N = 22;
-  const BASE_V0 = 24; // desired speed in m/s (~86 km/h)
+  let N = 22;
+  let BASE_V0_KMH = 90;    // speed limit, set via slider (km/h)
+  let vehicles = [];
+  let simTime = 0;
 
-  const vehicles = [];
-  for (let i = 0; i < N; i++) {
-    vehicles.push({
-      pos: (TRACK_LENGTH / N) * i,
-      speed: BASE_V0 * (0.9 + Math.random() * 0.1),
-      v0: BASE_V0 * (0.92 + Math.random() * 0.16), // heterogeneous drivers
-      length: IDM.vehicleLength,
-      forcedBrakeUntil: 0
-    });
+  function initSim(count, limitKmh) {
+    N = count;
+    BASE_V0_KMH = limitKmh;
+    const baseV0 = limitKmh / 3.6; // desired speed in m/s
+
+    vehicles = [];
+    for (let i = 0; i < N; i++) {
+      vehicles.push({
+        pos: (TRACK_LENGTH / N) * i,
+        speed: baseV0 * (0.9 + Math.random() * 0.1),
+        v0: baseV0 * (0.92 + Math.random() * 0.16), // heterogeneous drivers
+        length: IDM.vehicleLength
+      });
+    }
+    // Seed a disturbance: vehicle 0 brakes hard shortly after start,
+    // so a phantom jam has something to grow from even in free flow.
+    vehicles[0].disturbanceAt = 2.0;
+    vehicles[0].disturbanceDone = false;
+
+    simTime = 0;
   }
-  // Seed a disturbance: vehicle 0 brakes hard shortly after start.
-  vehicles[0].disturbanceAt = 2.0;
-  vehicles[0].disturbanceDone = false;
 
   function idmAccel(v, leader) {
     const gap = ((leader.pos - v.pos - leader.length) % TRACK_LENGTH + TRACK_LENGTH) % TRACK_LENGTH;
@@ -316,8 +428,6 @@
     let accel = IDM.a * (1 - Math.pow(v.speed / v.v0, IDM.delta) - Math.pow(sStar / safeGap, 2));
     return Math.max(-8, Math.min(IDM.a, accel));
   }
-
-  let simTime = 0;
 
   function step(dt) {
     simTime += dt;
@@ -407,10 +517,12 @@
     const speeds = vehicles.map(v => v.speed);
     const avg = speeds.reduce((a, b) => a + b, 0) / N;
     const min = Math.min(...speeds);
-    const jamCount = speeds.filter(s => s * 3.6 < 30).length;
+    const jamThresholdKmh = Math.max(15, BASE_V0_KMH * 0.35);
+    const jamCount = speeds.filter(s => s * 3.6 < jamThresholdKmh).length;
 
     document.getElementById('hud-avg').textContent = (avg * 3.6).toFixed(0) + ' km/h';
     document.getElementById('hud-min').textContent = (min * 3.6).toFixed(0) + ' km/h';
+    document.getElementById('hud-jam-label').textContent = 'Im Stau (< ' + jamThresholdKmh.toFixed(0) + ' km/h)';
     document.getElementById('hud-jam').textContent = jamCount + ' / ' + N;
     document.getElementById('hud-time').textContent = simTime.toFixed(0) + ' s';
   }
@@ -429,6 +541,25 @@
     requestAnimationFrame(loop);
   }
 
+  // ---------- Controls ----------
+  const countSlider = document.getElementById('count-slider');
+  const limitSlider = document.getElementById('limit-slider');
+  const countVal = document.getElementById('count-val');
+  const limitVal = document.getElementById('limit-val');
+  const resetBtn = document.getElementById('reset-btn');
+
+  countSlider.addEventListener('input', () => {
+    countVal.textContent = countSlider.value;
+  });
+  limitSlider.addEventListener('input', () => {
+    limitVal.textContent = limitSlider.value + ' km/h';
+  });
+  resetBtn.addEventListener('click', () => {
+    initSim(parseInt(countSlider.value, 10), parseInt(limitSlider.value, 10));
+  });
+
+  initSim(parseInt(countSlider.value, 10), parseInt(limitSlider.value, 10));
+  lastT = null;
   requestAnimationFrame(loop);
 })();
 </script>
