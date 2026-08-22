@@ -154,17 +154,98 @@
     justify-content: space-between;
   }
 
-  .note {
+  .inspector {
     position: absolute;
-    bottom: 14px;
-    left: 16px;
+    bottom: 16px;
     right: 16px;
-    text-align: center;
+    background: var(--panel-bg);
+    border: 1px solid var(--panel-border);
+    border-radius: 10px;
+    padding: 12px 16px;
+    backdrop-filter: blur(6px);
+    width: 216px;
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  .inspector-empty {
+    margin: 4px 0 0;
     font-size: 11.5px;
+    line-height: 1.5;
+    color: var(--text-muted);
+    max-width: 190px;
+  }
+
+  .inspector-body {
+    display: none;
+  }
+
+  .inspector-body.active {
+    display: block;
+  }
+
+  #inspector.has-selection .inspector-empty { display: none; }
+
+  .inspector-action {
+    width: 100%;
+    margin-top: 8px;
+    font-family: 'Space Grotesk', sans-serif;
+    font-weight: 600;
+    font-size: 13px;
+    color: #0b0f14;
+    background: var(--jam);
+    border: none;
+    border-radius: 7px;
+    padding: 8px 10px;
+    cursor: pointer;
+    transition: filter 0.12s ease;
+  }
+  .inspector-action:hover { filter: brightness(1.1); }
+  .inspector-action:focus-visible { outline: 2px solid var(--text); outline-offset: 2px; }
+
+  .stepper {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-top: 8px;
+    gap: 8px;
+  }
+
+  .stepper-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    flex: 1;
+  }
+
+  .step-btn {
+    width: 26px;
+    height: 26px;
+    border-radius: 6px;
+    border: 1px solid var(--panel-border);
+    background: #1a1f26;
+    color: var(--text);
+    font-size: 15px;
+    font-weight: 700;
+    cursor: pointer;
+    line-height: 1;
+  }
+  .step-btn:hover { background: #232a33; }
+  .step-btn:focus-visible { outline: 2px solid var(--marking); outline-offset: 1px; }
+
+  .inspector-link {
+    display: block;
+    width: 100%;
+    margin-top: 10px;
+    background: none;
+    border: none;
     color: var(--text-muted);
     font-family: 'JetBrains Mono', monospace;
-    letter-spacing: 0.02em;
+    font-size: 11px;
+    text-decoration: underline;
+    cursor: pointer;
+    padding: 0;
+    text-align: left;
   }
+  .inspector-link:hover { color: var(--text); }
 
   .controls {
     width: 100%;
@@ -272,11 +353,11 @@
 <div class="page">
   <header>
     <p class="eyebrow">Prototyp · 01</p>
-    <h1>Wie ein einzelnes Bremsmanöver zum Stau wird</h1>
+    <h1>Ein Fahrzeug antippen, den Verkehr verändern</h1>
     <p class="subtitle">
       Fahrzeuge auf einer geschlossenen Ringstraße, simuliert mit dem <em>Intelligent Driver Model</em>.
-      Kein Unfall, keine Ampel, keine Baustelle — nur ein kurzes Antippen der Bremse reicht,
-      damit sich eine Stauwelle rückwärts durch den Verkehr schiebt.
+      Klicke auf ein Fahrzeug und bremse es, ändere seine Richtgeschwindigkeit oder seinen
+      Sicherheitsabstand — und beobachte, wie sich das auf den Verkehr dahinter auswirkt.
     </p>
   </header>
 
@@ -298,7 +379,28 @@
       </div>
     </div>
 
-    <div class="note">Tempolimit wirkt sofort · Fahrzeuganzahl braucht „Simulation neu starten"</div>
+    <div class="inspector" id="inspector">
+      <div class="legend-title">Ausgewähltes Fahrzeug</div>
+      <p class="inspector-empty" id="inspector-empty">Klicke auf ein Fahrzeug in der Simulation, um es zu bremsen oder seine Werte anzupassen.</p>
+      <div class="inspector-body" id="inspector-body">
+        <div class="hud-row"><span class="label">Fahrzeug</span><span class="value" id="insp-id">—</span></div>
+        <div class="hud-row"><span class="label">Aktuelles Tempo</span><span class="value" id="insp-speed">—</span></div>
+        <div class="hud-row"><span class="label">Richtgeschwindigkeit</span><span class="value" id="insp-v0">—</span></div>
+        <div class="hud-row"><span class="label">Sicherheitsabstand</span><span class="value" id="insp-s0">—</span></div>
+        <button id="brake-btn" class="inspector-action">Jetzt bremsen</button>
+        <div class="stepper">
+          <span class="stepper-label">Richtgeschw.</span>
+          <button id="v0-down" class="step-btn">−</button>
+          <button id="v0-up" class="step-btn">+</button>
+        </div>
+        <div class="stepper">
+          <span class="stepper-label">Sicherheitsabstand</span>
+          <button id="gap-down" class="step-btn">−</button>
+          <button id="gap-up" class="step-btn">+</button>
+        </div>
+        <button id="deselect-btn" class="inspector-link">Auswahl aufheben</button>
+      </div>
+    </div>
   </div>
 
   <div class="controls">
@@ -315,9 +417,10 @@
 
   <footer>
     <strong>Was hier passiert:</strong> Jedes Fahrzeug reagiert nur auf den Abstand und die Geschwindigkeit
-    des Vordermanns (IDM-Formel von Treiber et al.). Es gibt keine zentrale Steuerung. Trotzdem entsteht aus
-    einer winzigen Störung — hier ein einmaliges Abbremsen kurz nach Start — eine sich selbst erhaltende
-    Stauwelle, die entgegen der Fahrtrichtung wandert. Das ist der klassische „Phantomstau".
+    des Vordermanns (IDM-Formel von Treiber et al.). Es gibt keine zentrale Steuerung. Wähle ein Fahrzeug aus
+    und greife manuell ein — schon ein kurzes Bremsen oder ein spürbar niedrigerer Sicherheitsabstand reicht,
+    damit sich eine sich selbst erhaltende Stauwelle bildet, die entgegen der Fahrtrichtung wandert.
+    Das ist der klassische „Phantomstau".
   </footer>
 </div>
 
@@ -384,19 +487,30 @@
   }
 
   // ---------- IDM parameters ----------
+  // CAR_LENGTH/CAR_WIDTH are the single source of truth for both the physics
+  // (gap calculation) and the rendering, so vehicles never visually overlap
+  // while the computed gap between them is still positive.
+  const CAR_LENGTH = 16;
+  const CAR_WIDTH = 8;
+
   const IDM = {
     T: 1.4,        // desired time headway (s)
     a: 1.3,        // max acceleration (m/s^2)
     b: 2.0,        // comfortable braking (m/s^2)
     delta: 4,
-    s0: 2.2,       // minimum gap (m)
-    vehicleLength: 5.2
+    s0: 6,         // default minimum bumper-to-bumper gap (same units as track)
+    vehicleLength: CAR_LENGTH
   };
 
   let N = 22;
   let BASE_V0_KMH = 90;    // speed limit, set via slider (km/h)
   let vehicles = [];
   let simTime = 0;
+  let selectedIndex = null;
+
+  function recomputeV0(v) {
+    v.v0 = Math.max(3, BASE_V0_KMH * v.v0Factor + v.v0DeltaKmh) / 3.6;
+  }
 
   function initSim(count, limitKmh) {
     N = count;
@@ -406,34 +520,34 @@
     vehicles = [];
     for (let i = 0; i < N; i++) {
       const v0Factor = 0.92 + Math.random() * 0.16; // heterogeneous drivers
-      vehicles.push({
+      const v = {
         pos: (TRACK_LENGTH / N) * i,
         speed: baseV0 * (0.9 + Math.random() * 0.1),
         v0Factor: v0Factor,
+        v0DeltaKmh: 0,
         v0: baseV0 * v0Factor,
+        s0: IDM.s0,
         length: IDM.vehicleLength
-      });
+      };
+      vehicles.push(v);
     }
-    // Seed a disturbance: vehicle 0 brakes hard shortly after start,
-    // so a phantom jam has something to grow from even in free flow.
-    vehicles[0].disturbanceAt = 2.0;
-    vehicles[0].disturbanceDone = false;
 
+    selectedIndex = null;
     simTime = 0;
+    updateInspector();
   }
 
   function applySpeedLimit(limitKmh) {
     BASE_V0_KMH = limitKmh;
-    const baseV0 = limitKmh / 3.6;
     for (const v of vehicles) {
-      v.v0 = baseV0 * v.v0Factor;
+      recomputeV0(v);
     }
   }
 
   function idmAccel(v, leader) {
     const gap = ((leader.pos - v.pos - leader.length) % TRACK_LENGTH + TRACK_LENGTH) % TRACK_LENGTH;
     const dv = v.speed - leader.speed;
-    const sStar = IDM.s0 + Math.max(0, v.speed * IDM.T + (v.speed * dv) / (2 * Math.sqrt(IDM.a * IDM.b)));
+    const sStar = v.s0 + Math.max(0, v.speed * IDM.T + (v.speed * dv) / (2 * Math.sqrt(IDM.a * IDM.b)));
     const safeGap = Math.max(gap, 0.15);
     let accel = IDM.a * (1 - Math.pow(v.speed / v.v0, IDM.delta) - Math.pow(sStar / safeGap, 2));
     return Math.max(-8, Math.min(IDM.a, accel));
@@ -441,13 +555,6 @@
 
   function step(dt) {
     simTime += dt;
-
-    // one-time disturbance to seed a phantom jam
-    const v0veh = vehicles[0];
-    if (!v0veh.disturbanceDone && simTime >= v0veh.disturbanceAt) {
-      v0veh.speed *= 0.35;
-      v0veh.disturbanceDone = true;
-    }
 
     const accels = new Array(N);
     for (let i = 0; i < N; i++) {
@@ -507,17 +614,35 @@
     ctx.setLineDash([]);
 
     // vehicles
-    for (const v of vehicles) {
+    for (let i = 0; i < vehicles.length; i++) {
+      const v = vehicles[i];
       const { x, y, heading } = trackPoint(v.pos);
+
+      if (i === selectedIndex) {
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.strokeStyle = '#e3b341';
+        ctx.lineWidth = 2;
+        ctx.setLineDash([4, 3]);
+        ctx.beginPath();
+        ctx.arc(0, 0, CAR_LENGTH * 0.85, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.restore();
+      }
+
       ctx.save();
       ctx.translate(x, y);
       ctx.rotate(heading);
-      const w = 15, h = 8;
       ctx.fillStyle = speedColor(v.speed, v.v0);
       ctx.shadowColor = ctx.fillStyle;
       ctx.shadowBlur = 6;
       ctx.beginPath();
-      ctx.roundRect ? ctx.roundRect(-w / 2, -h / 2, w, h, 2) : ctx.rect(-w / 2, -h / 2, w, h);
+      if (ctx.roundRect) {
+        ctx.roundRect(-CAR_LENGTH / 2, -CAR_WIDTH / 2, CAR_LENGTH, CAR_WIDTH, 2);
+      } else {
+        ctx.rect(-CAR_LENGTH / 2, -CAR_WIDTH / 2, CAR_LENGTH, CAR_WIDTH);
+      }
       ctx.fill();
       ctx.restore();
     }
@@ -537,6 +662,23 @@
     document.getElementById('hud-time').textContent = simTime.toFixed(0) + ' s';
   }
 
+  function updateInspector() {
+    const panel = document.getElementById('inspector');
+    const body = document.getElementById('inspector-body');
+    if (selectedIndex === null || !vehicles[selectedIndex]) {
+      panel.classList.remove('has-selection');
+      body.classList.remove('active');
+      return;
+    }
+    const v = vehicles[selectedIndex];
+    panel.classList.add('has-selection');
+    body.classList.add('active');
+    document.getElementById('insp-id').textContent = '#' + (selectedIndex + 1);
+    document.getElementById('insp-speed').textContent = (v.speed * 3.6).toFixed(0) + ' km/h';
+    document.getElementById('insp-v0').textContent = (v.v0 * 3.6).toFixed(0) + ' km/h';
+    document.getElementById('insp-s0').textContent = v.s0.toFixed(1) + ' m';
+  }
+
   let lastT = null;
   function loop(t) {
     if (lastT === null) lastT = t;
@@ -547,6 +689,7 @@
     step(dt);
     draw();
     updateHud();
+    updateInspector();
 
     requestAnimationFrame(loop);
   }
@@ -567,6 +710,66 @@
   });
   resetBtn.addEventListener('click', () => {
     initSim(parseInt(countSlider.value, 10), parseInt(limitSlider.value, 10));
+  });
+
+  // ---------- Vehicle selection & manual intervention ----------
+  canvas.addEventListener('click', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    const clickX = (e.clientX - rect.left) * scaleX;
+    const clickY = (e.clientY - rect.top) * scaleY;
+
+    let nearest = null;
+    let nearestDist = Infinity;
+    for (let i = 0; i < vehicles.length; i++) {
+      const { x, y } = trackPoint(vehicles[i].pos);
+      const d = Math.hypot(x - clickX, y - clickY);
+      if (d < nearestDist) {
+        nearestDist = d;
+        nearest = i;
+      }
+    }
+    selectedIndex = (nearest !== null && nearestDist < 26) ? nearest : null;
+    updateInspector();
+  });
+
+  document.getElementById('brake-btn').addEventListener('click', () => {
+    if (selectedIndex === null) return;
+    vehicles[selectedIndex].speed = Math.max(0, vehicles[selectedIndex].speed * 0.35);
+  });
+
+  document.getElementById('v0-up').addEventListener('click', () => {
+    if (selectedIndex === null) return;
+    const v = vehicles[selectedIndex];
+    v.v0DeltaKmh += 5;
+    recomputeV0(v);
+    updateInspector();
+  });
+  document.getElementById('v0-down').addEventListener('click', () => {
+    if (selectedIndex === null) return;
+    const v = vehicles[selectedIndex];
+    v.v0DeltaKmh -= 5;
+    recomputeV0(v);
+    updateInspector();
+  });
+
+  document.getElementById('gap-up').addEventListener('click', () => {
+    if (selectedIndex === null) return;
+    const v = vehicles[selectedIndex];
+    v.s0 = Math.min(20, v.s0 + 1);
+    updateInspector();
+  });
+  document.getElementById('gap-down').addEventListener('click', () => {
+    if (selectedIndex === null) return;
+    const v = vehicles[selectedIndex];
+    v.s0 = Math.max(0.5, v.s0 - 1);
+    updateInspector();
+  });
+
+  document.getElementById('deselect-btn').addEventListener('click', () => {
+    selectedIndex = null;
+    updateInspector();
   });
 
   initSim(parseInt(countSlider.value, 10), parseInt(limitSlider.value, 10));
