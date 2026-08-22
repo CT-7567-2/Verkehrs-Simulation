@@ -298,7 +298,7 @@
       </div>
     </div>
 
-    <div class="note">Werte anpassen und „Simulation neu starten" drücken, um sie mit den neuen Parametern zu sehen.</div>
+    <div class="note">Tempolimit wirkt sofort · Fahrzeuganzahl braucht „Simulation neu starten"</div>
   </div>
 
   <div class="controls">
@@ -405,10 +405,12 @@
 
     vehicles = [];
     for (let i = 0; i < N; i++) {
+      const v0Factor = 0.92 + Math.random() * 0.16; // heterogeneous drivers
       vehicles.push({
         pos: (TRACK_LENGTH / N) * i,
         speed: baseV0 * (0.9 + Math.random() * 0.1),
-        v0: baseV0 * (0.92 + Math.random() * 0.16), // heterogeneous drivers
+        v0Factor: v0Factor,
+        v0: baseV0 * v0Factor,
         length: IDM.vehicleLength
       });
     }
@@ -418,6 +420,14 @@
     vehicles[0].disturbanceDone = false;
 
     simTime = 0;
+  }
+
+  function applySpeedLimit(limitKmh) {
+    BASE_V0_KMH = limitKmh;
+    const baseV0 = limitKmh / 3.6;
+    for (const v of vehicles) {
+      v.v0 = baseV0 * v.v0Factor;
+    }
   }
 
   function idmAccel(v, leader) {
@@ -553,6 +563,7 @@
   });
   limitSlider.addEventListener('input', () => {
     limitVal.textContent = limitSlider.value + ' km/h';
+    applySpeedLimit(parseInt(limitSlider.value, 10));
   });
   resetBtn.addEventListener('click', () => {
     initSim(parseInt(countSlider.value, 10), parseInt(limitSlider.value, 10));
