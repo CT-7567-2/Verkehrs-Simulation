@@ -73,6 +73,33 @@
     margin: 0;
   }
 
+  .track-select {
+    display: flex;
+    gap: 10px;
+    margin-top: 16px;
+    flex-wrap: wrap;
+  }
+
+  .track-btn {
+    font-family: 'Space Grotesk', sans-serif;
+    font-weight: 600;
+    font-size: 13.5px;
+    color: var(--text);
+    background: var(--panel-bg);
+    border: 1px solid var(--panel-border);
+    border-radius: 9px;
+    padding: 10px 16px;
+    cursor: pointer;
+    transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+  }
+  .track-btn:hover { background: #1a1f26; }
+  .track-btn.active {
+    background: var(--marking);
+    color: #0b0f14;
+    border-color: var(--marking);
+  }
+  .track-btn:focus-visible { outline: 2px solid var(--marking); outline-offset: 2px; }
+
   .stage {
     position: relative;
     width: 100%;
@@ -388,7 +415,7 @@
 <body>
 <div class="page">
   <header>
-    <p class="eyebrow">Prototyp · 02</p>
+    <p class="eyebrow">Prototyp · 03</p>
     <h1>Ampeln, Vorfahrt und echter Rechtsverkehr</h1>
     <p class="subtitle">
       Zum Start fährt schon etwa die Hälfte der Fahrzeuge als Gegenverkehr auf der linken Spur. Fasse
@@ -396,6 +423,10 @@
       seine Fahrtrichtung. Platziere Ampeln und Vorfahrtsschilder frei auf der Strecke; Ampeln schaltest
       du manuell per Klick zwischen Rot und Grün.
     </p>
+    <div class="track-select">
+      <button id="track-oval-btn" class="track-btn active">Ringstraße</button>
+      <button id="track-figure8-btn" class="track-btn">Doppelschleife mit Kreuzung</button>
+    </div>
   </header>
 
   <div class="stage">
@@ -447,11 +478,11 @@
   <div class="controls">
     <div class="control">
       <label for="count-slider">Anzahl Fahrzeuge <span class="val" id="count-val">22</span></label>
-      <input type="range" id="count-slider" min="1" max="90" step="1" value="22">
+      <input type="range" id="count-slider" min="4" max="45" step="1" value="22">
     </div>
     <div class="control">
       <label for="limit-slider">Tempolimit <span class="val" id="limit-val">90 km/h</span></label>
-      <input type="range" id="limit-slider" min="10" max="150" step="5" value="90">
+      <input type="range" id="limit-slider" min="30" max="150" step="5" value="90">
     </div>
     <div class="control">
       <label for="timescale-slider">Simulationsgeschwindigkeit <span class="val" id="timescale-val">1×</span></label>
@@ -490,9 +521,14 @@
     Strecke — all das reicht, damit sich eine sich selbst erhaltende Stauwelle bildet.
     Das ist der klassische „Phantomstau".
     <br><br>
-    <strong>Hinweis zu Vorfahrtsschildern:</strong> Sie lassen sich schon platzieren, wirken aber noch nicht
-    auf den Verkehr — echte Vorfahrtsregeln ergeben erst mit richtigen Kreuzungen Sinn, die mit dem
-    geplanten Straßennetz-Editor dazukommen.
+    <strong>Kreuzung (Doppelschleife):</strong> An der einen echten Kreuzung der Achterbahn-Strecke
+    treffen bis zu vier Verkehrsströme aufeinander (beide Fahrtrichtungen auf beiden Schleifen). Wer zuerst
+    nah genug herankommt, bekommt automatisch Vorfahrt; alle anderen warten, bis die Kreuzung wieder frei
+    ist — ganz ohne Ampeln, wie eine unbeschilderte Kreuzung im echten Verkehr.
+    <br><br>
+    <strong>Hinweis zu Vorfahrtsschildern:</strong> Sie lassen sich weiterhin frei platzieren, wirken aber
+    noch nicht auf die automatische Vorfahrtsregelung an der Kreuzung — das ist der nächste logische
+    Ausbauschritt.
   </footer>
 </div>
 
@@ -502,13 +538,13 @@
   const ctx = canvas.getContext('2d');
 
   // ---------- Track geometry (in simulation units, 1 unit ≈ 1 meter) ----------
-  const STRAIGHT = 340;      // length of each straight section
-  const RADIUS = 190;        // radius of each semicircular turn
-  const TRACK_LENGTH = 2 * STRAIGHT + 2 * Math.PI * RADIUS;
+  // Two selectable tracks share the same vehicle physics: both are built as
+  // ONE continuous closed arc-length path (a single `s` coordinate that
+  // wraps at TRACK_LENGTH) — the figure-8 just happens to cross itself once
+  // in physical (x, y) space. That's what lets every other part of the
+  // simulation (car-following, drag & drop, lights/signs, rendering) work
+  // completely unchanged on both tracks.
   const ROAD_WIDTH = 46;
-
-  const offsetX = (canvas.width - (2 * RADIUS + STRAIGHT)) / 2;
-  const offsetY = (canvas.height - 2 * RADIUS) / 2;
 
   // How far vehicles sit from the centerline, toward the right-hand side of
   // their direction of travel (right-hand traffic), plus how far roadside
@@ -528,53 +564,150 @@
     return { x: p.x + r.x * offsetAmount, y: p.y + r.y * offsetAmount, heading: p.heading };
   }
 
-  // Returns {x, y, heading} for arc-length position s along the loop.
-  function trackPoint(s) {
-    s = ((s % TRACK_LENGTH) + TRACK_LENGTH) % TRACK_LENGTH;
-    const cx1 = offsetX + RADIUS + STRAIGHT; // right circle center x
-    const cy = offsetY + RADIUS;
-    const cx0 = offsetX + RADIUS;            // left circle center x
+  // ---- Track 1: oval ring road (the original track) ----
+  function buildOvalTrack() {
+    const STRAIGHT = 340;
+    const RADIUS = 190;
+    const length = 2 * STRAIGHT + 2 * Math.PI * RADIUS;
+    const offsetX = (canvas.width - (2 * RADIUS + STRAIGHT)) / 2;
+    const offsetY = (canvas.height - 2 * RADIUS) / 2;
 
-    if (s < STRAIGHT) {
-      // top straight, moving +x
-      return { x: offsetX + RADIUS + s, y: offsetY, heading: 0 };
-    }
-    s -= STRAIGHT;
+    function trackPointImpl(s) {
+      s = ((s % length) + length) % length;
+      const cx1 = offsetX + RADIUS + STRAIGHT;
+      const cy = offsetY + RADIUS;
+      const cx0 = offsetX + RADIUS;
 
-    const halfCirc = Math.PI * RADIUS;
-    if (s < halfCirc) {
-      // right semicircle, angle from -90deg to +90deg
-      const angle = -Math.PI / 2 + s / RADIUS;
-      const x = cx1 + RADIUS * Math.cos(angle);
+      if (s < STRAIGHT) {
+        return { x: offsetX + RADIUS + s, y: offsetY, heading: 0 };
+      }
+      s -= STRAIGHT;
+
+      const halfCirc = Math.PI * RADIUS;
+      if (s < halfCirc) {
+        const angle = -Math.PI / 2 + s / RADIUS;
+        const x = cx1 + RADIUS * Math.cos(angle);
+        const y = cy + RADIUS * Math.sin(angle);
+        const heading = Math.atan2(Math.cos(angle), -Math.sin(angle));
+        return { x, y, heading };
+      }
+      s -= halfCirc;
+
+      if (s < STRAIGHT) {
+        return { x: offsetX + RADIUS + STRAIGHT - s, y: offsetY + 2 * RADIUS, heading: Math.PI };
+      }
+      s -= STRAIGHT;
+
+      const angle = Math.PI / 2 + s / RADIUS;
+      const x = cx0 + RADIUS * Math.cos(angle);
       const y = cy + RADIUS * Math.sin(angle);
       const heading = Math.atan2(Math.cos(angle), -Math.sin(angle));
       return { x, y, heading };
     }
-    s -= halfCirc;
 
-    if (s < STRAIGHT) {
-      // bottom straight, moving -x
-      return { x: offsetX + RADIUS + STRAIGHT - s, y: offsetY + 2 * RADIUS, heading: Math.PI };
+    function drawPathImpl() {
+      ctx.beginPath();
+      ctx.moveTo(offsetX + RADIUS, offsetY);
+      ctx.lineTo(offsetX + RADIUS + STRAIGHT, offsetY);
+      ctx.arc(offsetX + RADIUS + STRAIGHT, offsetY + RADIUS, RADIUS, -Math.PI / 2, Math.PI / 2, false);
+      ctx.lineTo(offsetX + RADIUS, offsetY + 2 * RADIUS);
+      ctx.arc(offsetX + RADIUS, offsetY + RADIUS, RADIUS, Math.PI / 2, 3 * Math.PI / 2, false);
+      ctx.closePath();
     }
-    s -= STRAIGHT;
 
-    // left semicircle, angle from +90deg to +270deg
-    const angle = Math.PI / 2 + s / RADIUS;
-    const x = cx0 + RADIUS * Math.cos(angle);
-    const y = cy + RADIUS * Math.sin(angle);
-    const heading = Math.atan2(Math.cos(angle), -Math.sin(angle));
-    return { x, y, heading };
+    return { length, trackPoint: trackPointImpl, drawPath: drawPathImpl, crossings: [] };
   }
 
-  function drawRoadPath() {
-    ctx.beginPath();
-    ctx.moveTo(offsetX + RADIUS, offsetY);
-    ctx.lineTo(offsetX + RADIUS + STRAIGHT, offsetY);
-    ctx.arc(offsetX + RADIUS + STRAIGHT, offsetY + RADIUS, RADIUS, -Math.PI / 2, Math.PI / 2, false);
-    ctx.lineTo(offsetX + RADIUS, offsetY + 2 * RADIUS);
-    ctx.arc(offsetX + RADIUS, offsetY + RADIUS, RADIUS, Math.PI / 2, 3 * Math.PI / 2, false);
-    ctx.closePath();
+  // ---- Track 2: figure-8 with one real intersection ----
+  // Traced as a Lemniscate of Gerono: x = A cos(t), y = A sin(t) cos(t).
+  // The curve passes back through the origin twice per lap (at t = π/2 and
+  // t = 3π/2), crossing itself transversally — a genuine X intersection,
+  // not just a touching pinch point. Arc length has no closed form here, so
+  // we numerically integrate a fine sample and build a uniform lookup table.
+  function buildFigure8Track() {
+    const A = 380;
+    const offsetX = canvas.width / 2;
+    const offsetY = canvas.height / 2;
+
+    const SAMPLE_N = 4000;
+    const raw = new Array(SAMPLE_N + 1);
+    for (let i = 0; i <= SAMPLE_N; i++) {
+      const t = (i / SAMPLE_N) * Math.PI * 2;
+      raw[i] = { t, x: A * Math.cos(t), y: A * Math.sin(t) * Math.cos(t) };
+    }
+    const cum = new Array(raw.length);
+    cum[0] = 0;
+    for (let i = 1; i < raw.length; i++) {
+      const dx = raw[i].x - raw[i - 1].x, dy = raw[i].y - raw[i - 1].y;
+      cum[i] = cum[i - 1] + Math.hypot(dx, dy);
+    }
+    const length = cum[cum.length - 1];
+
+    // Uniform-arc-length lookup table for O(1) trackPoint queries.
+    const LUT_N = 2000;
+    const lut = new Array(LUT_N + 1);
+    let rawIdx = 1;
+    for (let k = 0; k <= LUT_N; k++) {
+      const targetS = (k / LUT_N) * length;
+      while (rawIdx < cum.length - 1 && cum[rawIdx] < targetS) rawIdx++;
+      const s0 = cum[rawIdx - 1], s1 = cum[rawIdx];
+      const frac = s1 > s0 ? (targetS - s0) / (s1 - s0) : 0;
+      const p0 = raw[rawIdx - 1], p1 = raw[rawIdx];
+      lut[k] = { x: p0.x + (p1.x - p0.x) * frac, y: p0.y + (p1.y - p0.y) * frac };
+    }
+    for (let k = 0; k <= LUT_N; k++) {
+      const prev = lut[(k - 1 + lut.length) % lut.length];
+      const next = lut[(k + 1) % lut.length];
+      lut[k].heading = Math.atan2(next.y - prev.y, next.x - prev.x);
+    }
+
+    function trackPointImpl(s) {
+      s = ((s % length) + length) % length;
+      const idx = (s / length) * LUT_N;
+      const i0 = Math.floor(idx) % (LUT_N + 1);
+      const i1 = (i0 + 1) % (LUT_N + 1);
+      const frac = idx - Math.floor(idx);
+      const a = lut[i0], b = lut[i1];
+      return {
+        x: offsetX + a.x + (b.x - a.x) * frac,
+        y: offsetY + a.y + (b.y - a.y) * frac,
+        heading: a.heading
+      };
+    }
+
+    function drawPathImpl() {
+      ctx.beginPath();
+      ctx.moveTo(offsetX + lut[0].x, offsetY + lut[0].y);
+      for (let k = 1; k <= LUT_N; k++) ctx.lineTo(offsetX + lut[k].x, offsetY + lut[k].y);
+      ctx.closePath();
+    }
+
+    function sAtT(targetT) {
+      const i = Math.round((targetT / (Math.PI * 2)) * SAMPLE_N);
+      return cum[Math.max(0, Math.min(cum.length - 1, i))];
+    }
+
+    const crossing = {
+      x: offsetX, y: offsetY,
+      branches: [sAtT(Math.PI / 2), sAtT(Math.PI * 3 / 2)],
+      occupant: null,   // { idx, branchS } — which vehicle currently "owns" the intersection
+      yieldStops: []    // recomputed every step: who has to wait this frame
+    };
+
+    return { length, trackPoint: trackPointImpl, drawPath: drawPathImpl, crossings: [crossing] };
   }
+
+  const TRACKS = {
+    oval: { label: 'Ringstraße', build: buildOvalTrack },
+    figure8: { label: 'Doppelschleife mit Kreuzung', build: buildFigure8Track }
+  };
+
+  let currentTrackId = 'oval';
+  let currentTrackDef = null;
+  let TRACK_LENGTH = 0;
+
+  function trackPoint(s) { return currentTrackDef.trackPoint(s); }
+  function drawRoadPath() { currentTrackDef.drawPath(); }
 
   // ---------- IDM parameters ----------
   // CAR_LENGTH/CAR_WIDTH are the single source of truth for both the physics
@@ -611,14 +744,16 @@
 
   // Precomputed samples along the track, used to snap a click to the
   // nearest point on the road (so placed elements sit exactly on the path).
-  const TRACK_SAMPLES = [];
-  (function buildTrackSamples() {
+  // Rebuilt whenever the track changes since geometry/length differ.
+  let TRACK_SAMPLES = [];
+  function rebuildTrackSamples() {
+    TRACK_SAMPLES = [];
     const STEP = 4;
     for (let s = 0; s < TRACK_LENGTH; s += STEP) {
       const p = trackPoint(s);
       TRACK_SAMPLES.push({ s, x: p.x, y: p.y });
     }
-  })();
+  }
 
   function nearestTrackPos(x, y) {
     let best = null, bestDist = Infinity;
@@ -631,6 +766,24 @@
     const r = rightOf(p.heading);
     const dot = (x - p.x) * r.x + (y - p.y) * r.y;
     return { s: best.s, side: dot >= 0 ? 1 : -1 };
+  }
+
+  // Switches to a different track layout: rebuilds the geometry, clears any
+  // placed lights/signs (their arc-length positions belong to the old track
+  // and would no longer make sense), and restarts the simulation on it.
+  function switchTrack(trackId) {
+    currentTrackId = trackId;
+    currentTrackDef = TRACKS[trackId].build();
+    TRACK_LENGTH = currentTrackDef.length;
+    rebuildTrackSamples();
+    trafficLights = [];
+    yieldSigns = [];
+    placementMode = null;
+    const lb = document.getElementById('place-light-btn');
+    const sb = document.getElementById('place-sign-btn');
+    if (lb) lb.classList.remove('active');
+    if (sb) sb.classList.remove('active');
+    initSim(N, BASE_V0_KMH);
   }
 
   function recomputeV0(v) {
@@ -765,6 +918,47 @@
       (vehicles[i].direction === -1 ? reverseIdx : forwardIdx).push(i);
     }
 
+    // ---- Intersection right-of-way (figure-8 track only) ----
+    // A crossing's two `branches` are the two arc-length points where the
+    // single path passes back through the same physical spot. Up to four
+    // approach flows meet there (each branch, each direction of travel).
+    // Whoever gets closest first "claims" the intersection; everyone else
+    // approaching gets a virtual stop placed right at their own branch —
+    // built the exact same way a red light is, so all the existing braking,
+    // queueing and post-stop acceleration boost logic applies for free.
+    const INTERSECTION_APPROACH = 70;
+    const INTERSECTION_CLEARANCE = CAR_LENGTH + 10;
+    for (const crossing of currentTrackDef.crossings) {
+      if (crossing.occupant) {
+        const v = vehicles[crossing.occupant.idx];
+        if (!v) {
+          crossing.occupant = null;
+        } else {
+          const branchS = crossing.occupant.branchS;
+          let past = v.direction === 1 ? (v.pos - branchS) : (branchS - v.pos);
+          past = ((past % TRACK_LENGTH) + TRACK_LENGTH) % TRACK_LENGTH;
+          if (past > INTERSECTION_CLEARANCE && past < TRACK_LENGTH / 2) crossing.occupant = null;
+        }
+      }
+
+      const approachers = [];
+      for (let i = 0; i < N; i++) {
+        const v = vehicles[i];
+        for (const branchS of crossing.branches) {
+          let d = v.direction === 1 ? (branchS - v.pos) : (v.pos - branchS);
+          d = ((d % TRACK_LENGTH) + TRACK_LENGTH) % TRACK_LENGTH;
+          if (d < INTERSECTION_APPROACH) approachers.push({ idx: i, branchS, dist: d, direction: v.direction });
+        }
+      }
+
+      if (!crossing.occupant && approachers.length > 0) {
+        approachers.sort((a, b) => a.dist - b.dist);
+        crossing.occupant = { idx: approachers[0].idx, branchS: approachers[0].branchS };
+      }
+
+      crossing.yieldStops = approachers.filter(a => !(crossing.occupant && a.idx === crossing.occupant.idx));
+    }
+
     const leaderOf = new Array(N);
 
     function assignLeaders(indices, dir) {
@@ -775,6 +969,11 @@
       for (const light of trafficLights) {
         if (light.state === 'red' && light.side === dir) {
           entities.push({ kind: 'light', pos: light.s, speed: 0, length: 0 });
+        }
+      }
+      for (const crossing of currentTrackDef.crossings) {
+        for (const stop of crossing.yieldStops) {
+          if (stop.direction === dir) entities.push({ kind: 'light', pos: stop.branchS, speed: 0, length: 0 });
         }
       }
       entities.sort((a, b) => a.pos - b.pos);
@@ -1250,6 +1449,22 @@
     yieldSigns = [];
   });
 
+  // ---------- Track selection ----------
+  const trackOvalBtn = document.getElementById('track-oval-btn');
+  const trackFigure8Btn = document.getElementById('track-figure8-btn');
+  trackOvalBtn.addEventListener('click', () => {
+    if (currentTrackId === 'oval') return;
+    trackOvalBtn.classList.add('active');
+    trackFigure8Btn.classList.remove('active');
+    switchTrack('oval');
+  });
+  trackFigure8Btn.addEventListener('click', () => {
+    if (currentTrackId === 'figure8') return;
+    trackFigure8Btn.classList.add('active');
+    trackOvalBtn.classList.remove('active');
+    switchTrack('figure8');
+  });
+
   document.getElementById('brake-btn').addEventListener('pointerdown', (e) => {
     e.preventDefault();
     if (selectedIndex === null) return;
@@ -1300,7 +1515,9 @@
     updateInspector();
   });
 
-  initSim(parseInt(countSlider.value, 10), parseInt(limitSlider.value, 10));
+  BASE_V0_KMH = parseInt(limitSlider.value, 10);
+  N = parseInt(countSlider.value, 10);
+  switchTrack('oval');
   lastT = null;
   requestAnimationFrame(loop);
 })();
