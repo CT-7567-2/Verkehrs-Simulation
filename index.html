@@ -407,14 +407,15 @@
       <div class="hud-row"><span class="label">Ø Geschwindigkeit</span><span class="value" id="hud-avg">—</span></div>
       <div class="hud-row"><span class="label">Min. Geschwindigkeit</span><span class="value" id="hud-min">—</span></div>
       <div class="hud-row"><span class="label" id="hud-jam-label">Im Stau</span><span class="value" id="hud-jam">—</span></div>
+      <div class="hud-row"><span class="label">Fahrzeuge stehen</span><span class="value" id="hud-stopped">—</span></div>
       <div class="hud-row"><span class="label">Simulationszeit</span><span class="value" id="hud-time">—</span></div>
     </div>
 
     <div class="panel legend">
       <div class="legend-title">Fahrzeugtempo</div>
-      <div class="gradient-bar"></div>
+      <div class="gradient-bar" id="gradient-bar"></div>
       <div class="gradient-labels">
-        <span>0 km/h</span><span id="legend-max">— km/h</span>
+        <span>0 km/h</span><span id="legend-limit">Limit</span><span id="legend-max">— km/h</span>
       </div>
     </div>
 
@@ -446,11 +447,11 @@
   <div class="controls">
     <div class="control">
       <label for="count-slider">Anzahl Fahrzeuge <span class="val" id="count-val">22</span></label>
-      <input type="range" id="count-slider" min="1" max="100" step="1" value="22">
+      <input type="range" id="count-slider" min="4" max="45" step="1" value="22">
     </div>
     <div class="control">
       <label for="limit-slider">Tempolimit <span class="val" id="limit-val">90 km/h</span></label>
-      <input type="range" id="limit-slider" min="10" max="250" step="5" value="90">
+      <input type="range" id="limit-slider" min="30" max="150" step="5" value="90">
     </div>
     <div class="control">
       <label for="timescale-slider">Simulationsgeschwindigkeit <span class="val" id="timescale-val">1×</span></label>
@@ -581,6 +582,7 @@
   // while the computed gap between them is still positive.
   const CAR_LENGTH = 16;
   const CAR_WIDTH = 8;
+  const STOPPED_THRESHOLD_KMH = 3; // below this, a vehicle counts as "stopped" and gets flagged
 
   const IDM = {
     T: 1.4,        // desired time headway (s)
@@ -838,20 +840,30 @@
   }
 
   function speedColor(speedMs) {
+    const limitMs = BASE_V0_KMH / 3.6;
     const maxRefMs = (BASE_V0_KMH + 15) / 3.6;
-    const ratio = Math.max(0, Math.min(1, speedMs / maxRefMs));
-    // red -> amber -> green
     let r, g, b;
-    if (ratio < 0.5) {
-      const t = ratio / 0.5;
-      r = 239 + t * (245 - 239);
-      g = 68 + t * (166 - 68);
-      b = 68 + t * (35 - 68);
+    if (speedMs <= limitMs) {
+      // 0 km/h (red) -> half the limit (amber) -> the limit itself (green)
+      const ratio = limitMs > 0 ? Math.max(0, Math.min(1, speedMs / limitMs)) : 1;
+      if (ratio < 0.5) {
+        const t = ratio / 0.5;
+        r = 239 + t * (245 - 239);
+        g = 68 + t * (166 - 68);
+        b = 68 + t * (35 - 68);
+      } else {
+        const t = (ratio - 0.5) / 0.5;
+        r = 245 + t * (34 - 245);
+        g = 166 + t * (197 - 166);
+        b = 35 + t * (94 - 35);
+      }
     } else {
-      const t = (ratio - 0.5) / 0.5;
-      r = 245 + t * (34 - 245);
-      g = 166 + t * (197 - 166);
-      b = 35 + t * (94 - 35);
+      // the limit (green) -> limit + 15 km/h (turquoise), for vehicles
+      // running faster than the posted speed limit
+      const t = Math.max(0, Math.min(1, (speedMs - limitMs) / (maxRefMs - limitMs)));
+      r = 34 + t * (45 - 34);
+      g = 197 + t * (212 - 197);
+      b = 94 + t * (191 - 94);
     }
     return `rgb(${r | 0}, ${g | 0}, ${b | 0})`;
   }
@@ -903,12 +915,14 @@
         ctx.restore();
       }
 
+      const isStopped = v.speed * 3.6 < STOPPED_THRESHOLD_KMH;
+
       ctx.save();
       ctx.translate(x, y);
       ctx.rotate(renderHeading);
-      ctx.fillStyle = speedColor(v.speed);
+      ctx.fillStyle = isStopped ? '#ff1a1a' : speedColor(v.speed);
       ctx.shadowColor = ctx.fillStyle;
-      ctx.shadowBlur = 6;
+      ctx.shadowBlur = isStopped ? 10 : 6;
       ctx.beginPath();
       if (ctx.roundRect) {
         ctx.roundRect(-CAR_LENGTH / 2, -CAR_WIDTH / 2, CAR_LENGTH, CAR_WIDTH, 2);
@@ -970,8 +984,17 @@
   }
 
   function updateLegend() {
+    const maxKmh = BASE_V0_KMH + 15;
+    const limitPercent = (BASE_V0_KMH / maxKmh) * 100;
+    const bar = document.getElementById('gradient-bar');
+    if (bar) {
+      bar.style.background =
+        `linear-gradient(90deg, #ef4444 0%, #f5a623 ${(limitPercent / 2).toFixed(1)}%, #22c55e ${limitPercent.toFixed(1)}%, #2dd4bf 100%)`;
+    }
+    const limitLabel = document.getElementById('legend-limit');
+    if (limitLabel) limitLabel.textContent = BASE_V0_KMH + ' km/h (Limit)';
     const el = document.getElementById('legend-max');
-    if (el) el.textContent = (BASE_V0_KMH + 15) + ' km/h';
+    if (el) el.textContent = maxKmh + ' km/h';
   }
 
   function updateHud() {
@@ -980,11 +1003,13 @@
     const min = Math.min(...speeds);
     const jamThresholdKmh = Math.max(15, BASE_V0_KMH * 0.35);
     const jamCount = speeds.filter(s => s * 3.6 < jamThresholdKmh).length;
+    const stoppedCount = speeds.filter(s => s * 3.6 < STOPPED_THRESHOLD_KMH).length;
 
     document.getElementById('hud-avg').textContent = (avg * 3.6).toFixed(0) + ' km/h';
     document.getElementById('hud-min').textContent = (min * 3.6).toFixed(0) + ' km/h';
     document.getElementById('hud-jam-label').textContent = 'Im Stau (< ' + jamThresholdKmh.toFixed(0) + ' km/h)';
     document.getElementById('hud-jam').textContent = jamCount + ' / ' + N;
+    document.getElementById('hud-stopped').textContent = stoppedCount + ' / ' + N;
     document.getElementById('hud-time').textContent = simTime.toFixed(0) + ' s';
   }
 
