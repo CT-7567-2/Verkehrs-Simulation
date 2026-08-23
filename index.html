@@ -465,7 +465,8 @@
       </div>
     </div>
     <p class="element-hint" id="element-hint">
-      Klicke auf die Straße, um zu platzieren. Klicke ein vorhandenes Element an, um es zu entfernen.
+      Klicke auf die Straße, um zu platzieren — je nachdem, auf welcher Seite du klickst, wirkt das
+      Element nur auf diese Fahrtrichtung. Klicke ein vorhandenes Element an, um es zu entfernen.
       Außerhalb des Platzierungsmodus schaltet ein Klick auf eine Ampel sie zwischen Rot und Grün um.
       Ein Fahrzeug lässt sich zusätzlich anfassen und verschieben — die Straßenseite beim Loslassen
       bestimmt die Fahrtrichtung.
@@ -474,9 +475,10 @@
 
   <footer>
     <strong>Was hier passiert:</strong> Jedes Fahrzeug reagiert nur auf den Abstand und die Geschwindigkeit
-    des Vordermanns oder einer roten Ampel (IDM-Formel von Treiber et al.) — Gegenverkehr auf der linken
-    Spur wird dabei komplett unabhängig von der rechten Spur simuliert, beide Richtungen halten aber an
-    derselben roten Ampel. Löst sich eine Blockade durch eine Ampel, beschleunigt das Fahrzeug für
+    des Vordermanns oder einer roten Ampel auf der eigenen Straßenseite (IDM-Formel von Treiber et al.) —
+    Gegenverkehr auf der linken Spur wird dabei komplett unabhängig von der rechten Spur simuliert, und
+    eine Ampel oder ein Schild wirkt jeweils nur auf die Fahrtrichtung, auf deren Seite es platziert wurde.
+    Löst sich eine Blockade durch eine Ampel, beschleunigt das Fahrzeug für
     einige Sekunden spürbar kräftiger, so wie Autofahrer es beim Anfahren tun — danach klingt der
     Effekt wieder ab. Es gibt keine zentrale Steuerung: Wähle ein Fahrzeug aus und
     greife manuell ein, verschiebe ein Fahrzeug an eine andere Stelle, oder platziere Ampeln auf der
@@ -616,9 +618,13 @@
     let best = null, bestDist = Infinity;
     for (const sample of TRACK_SAMPLES) {
       const d = Math.hypot(sample.x - x, sample.y - y);
-      if (d < bestDist) { bestDist = d; best = sample.s; }
+      if (d < bestDist) { bestDist = d; best = sample; }
     }
-    return best;
+    if (!best) return null;
+    const p = trackPoint(best.s);
+    const r = rightOf(p.heading);
+    const dot = (x - p.x) * r.x + (y - p.y) * r.y;
+    return { s: best.s, side: dot >= 0 ? 1 : -1 };
   }
 
   function recomputeV0(v) {
@@ -668,20 +674,31 @@
     updateLegend();
   }
 
-  // Shortest signed distance to `leader` *in v's own direction of travel*,
-  // positive if leader is ahead, negative if they already overlap.
-  // (A plain modulo gap breaks down right at the moment of a near-collision:
-  // a tiny negative raw gap would wrap around to "almost a full lap of free
-  // road", which is exactly what let vehicles drive straight through each
-  // other during hard braking.)
+  // Distance to `leader` *going forward in v's own direction of travel*,
+  // positive if leader is ahead (however far around the loop that is),
+  // negative only for a genuine near-collision.
+  //
+  // This is NOT simply "whichever wrap gives the smallest absolute value":
+  // with only a couple of vehicles sharing a lane (e.g. exactly one vehicle
+  // driving the other way), a vehicle's real leader — found earlier via the
+  // sorted position order — can legitimately sit almost a full lap away.
+  // Picking the numerically-shortest wrap would then measure the distance
+  // in the *wrong* rotational direction and report a small negative "gap",
+  // which is exactly what caused vehicles to falsely think they'd already
+  // collided and get teleported forward every frame.
+  //
+  // So instead we always wrap into the forward direction — a real gap can
+  // legitimately be almost the whole track length — and only reinterpret a
+  // result within a whisker of a full lap as the small negative overlap it
+  // actually is (a true near-collision always shows up right at that edge,
+  // never as a moderate value like "73" or "1358").
   function signedGap(v, leader) {
     const dir = v.direction || 1;
     let raw = dir === 1
       ? (leader.pos - v.pos - leader.length)
       : (v.pos - leader.pos - leader.length);
-    const half = TRACK_LENGTH / 2;
-    while (raw > half) raw -= TRACK_LENGTH;
-    while (raw < -half) raw += TRACK_LENGTH;
+    raw = ((raw % TRACK_LENGTH) + TRACK_LENGTH) % TRACK_LENGTH;
+    if (raw > TRACK_LENGTH - 50) raw -= TRACK_LENGTH;
     return raw;
   }
 
@@ -701,11 +718,18 @@
   }
 
   function idmAccel(v, leader) {
-    const gap = signedGap(v, leader);
-    const dv = v.speed - leader.speed;
-    const sStar = v.s0 + Math.max(0, v.speed * IDM.T + (v.speed * dv) / (2 * Math.sqrt(IDM.a * IDM.b)));
-    const safeGap = Math.max(gap, 0.1); // floor avoids div-by-zero/negative, forces max braking when very close
-    let accel = IDM.a * (1 - Math.pow(v.speed / v.v0, IDM.delta) - Math.pow(sStar / safeGap, 2));
+    let accel;
+    if (!leader) {
+      // No one ahead in this lane at all — just accelerate toward the
+      // desired speed, there is nothing to keep a gap to.
+      accel = IDM.a * (1 - Math.pow(v.speed / v.v0, IDM.delta));
+    } else {
+      const gap = signedGap(v, leader);
+      const dv = v.speed - leader.speed;
+      const sStar = v.s0 + Math.max(0, v.speed * IDM.T + (v.speed * dv) / (2 * Math.sqrt(IDM.a * IDM.b)));
+      const safeGap = Math.max(gap, 0.1); // floor avoids div-by-zero/negative, forces max braking when very close
+      accel = IDM.a * (1 - Math.pow(v.speed / v.v0, IDM.delta) - Math.pow(sStar / safeGap, 2));
+    }
     if (accel > 0) accel *= lightBoostFactor(v);
     return Math.max(-8, Math.min(MAX_ACCEL_BOOSTED, accel));
   }
@@ -714,8 +738,9 @@
     simTime += dt;
 
     // Split into the two direction groups. Each group only ever follows
-    // other members of its own group (its own lane) plus red lights, which
-    // block both lanes since they sit across the whole road.
+    // other members of its own group (its own lane) plus red lights placed
+    // on that same side of the road — a light on the right only stops
+    // forward traffic, a light on the left only stops oncoming traffic.
     const forwardIdx = [];
     const reverseIdx = [];
     for (let i = 0; i < N; i++) {
@@ -730,10 +755,22 @@
         kind: 'car', idx: i, pos: vehicles[i].pos, speed: vehicles[i].speed, length: vehicles[i].length
       }));
       for (const light of trafficLights) {
-        if (light.state === 'red') entities.push({ kind: 'light', pos: light.s, speed: 0, length: 0 });
+        if (light.state === 'red' && light.side === dir) {
+          entities.push({ kind: 'light', pos: light.s, speed: 0, length: 0 });
+        }
       }
       entities.sort((a, b) => a.pos - b.pos);
       const M = entities.length;
+
+      if (M === 1) {
+        // The lone vehicle in this direction has nothing ahead of it — no
+        // other vehicle in its lane, no red light. Give it no leader at all
+        // rather than letting it wrap around and find itself, which used to
+        // register as a permanent near-collision with itself every frame.
+        leaderOf[indices[0]] = null;
+        return;
+      }
+
       const posInEntities = new Map();
       for (let k = 0; k < M; k++) if (entities[k].kind === 'car') posInEntities.set(entities[k].idx, k);
       for (const i of indices) {
@@ -784,6 +821,7 @@
     for (let i = 0; i < N; i++) {
       if (draggingIndex === i) continue;
       const leader = leaderOf[i];
+      if (!leader) continue; // free road — nothing to clamp against
       const gap = signedGap(vehicles[i], leader);
       if (gap < 0) {
         const dir = vehicles[i].direction;
@@ -879,7 +917,7 @@
 
     // yield / right-of-way signs (visual only for now — see footer note)
     for (const sign of yieldSigns) {
-      const { x, y } = laneOffsetPoint(sign.s, ROADSIDE_OFFSET);
+      const { x, y } = laneOffsetPoint(sign.s, ROADSIDE_OFFSET * sign.side);
       ctx.save();
       ctx.translate(x, y);
       ctx.shadowColor = '#000';
@@ -901,7 +939,7 @@
 
     // traffic lights (click to toggle red/green manually)
     for (const light of trafficLights) {
-      const { x, y } = laneOffsetPoint(light.s, ROADSIDE_OFFSET);
+      const { x, y } = laneOffsetPoint(light.s, ROADSIDE_OFFSET * light.side);
       ctx.save();
       ctx.translate(x, y);
       // pole
@@ -1000,10 +1038,10 @@
   });
 
   // ---------- Vehicle selection & manual intervention ----------
-  function hitTestList(list, x, y, offsetAmount, radius) {
+  function hitTestList(list, x, y, radius) {
     let nearest = -1, nearestDist = Infinity;
     for (let i = 0; i < list.length; i++) {
-      const p = laneOffsetPoint(list[i].s, offsetAmount);
+      const p = laneOffsetPoint(list[i].s, ROADSIDE_OFFSET * list[i].side);
       const d = Math.hypot(p.x - x, p.y - y);
       if (d < nearestDist) { nearestDist = d; nearest = i; }
     }
@@ -1094,29 +1132,29 @@
     const { x: clickX, y: clickY } = canvasCoords(e);
 
     if (placementMode === 'light') {
-      const hitIdx = hitTestList(trafficLights, clickX, clickY, ROADSIDE_OFFSET, 16);
+      const hitIdx = hitTestList(trafficLights, clickX, clickY, 16);
       if (hitIdx !== -1) {
         trafficLights.splice(hitIdx, 1);
       } else {
-        const s = nearestTrackPos(clickX, clickY);
-        if (s !== null) trafficLights.push({ s, state: 'red' });
+        const hit = nearestTrackPos(clickX, clickY);
+        if (hit) trafficLights.push({ s: hit.s, side: hit.side, state: 'red' });
       }
       return;
     }
 
     if (placementMode === 'sign') {
-      const hitIdx = hitTestList(yieldSigns, clickX, clickY, ROADSIDE_OFFSET, 16);
+      const hitIdx = hitTestList(yieldSigns, clickX, clickY, 16);
       if (hitIdx !== -1) {
         yieldSigns.splice(hitIdx, 1);
       } else {
-        const s = nearestTrackPos(clickX, clickY);
-        if (s !== null) yieldSigns.push({ s });
+        const hit = nearestTrackPos(clickX, clickY);
+        if (hit) yieldSigns.push({ s: hit.s, side: hit.side });
       }
       return;
     }
 
     // Normal mode: clicking an existing light toggles it red/green.
-    const lightIdx = hitTestList(trafficLights, clickX, clickY, ROADSIDE_OFFSET, 16);
+    const lightIdx = hitTestList(trafficLights, clickX, clickY, 16);
     if (lightIdx !== -1) {
       trafficLights[lightIdx].state = trafficLights[lightIdx].state === 'red' ? 'green' : 'red';
       return;
@@ -1124,7 +1162,7 @@
 
     // Clicking a sign currently does nothing functional — consume the click
     // so it doesn't accidentally select a distant vehicle instead.
-    const signIdx = hitTestList(yieldSigns, clickX, clickY, ROADSIDE_OFFSET, 16);
+    const signIdx = hitTestList(yieldSigns, clickX, clickY, 16);
     if (signIdx !== -1) return;
 
     // Otherwise, select the nearest vehicle (each on its own lane side).
