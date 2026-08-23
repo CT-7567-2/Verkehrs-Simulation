@@ -391,9 +391,9 @@
     <p class="eyebrow">Prototyp · 02</p>
     <h1>Ampeln, Vorfahrt und echter Rechtsverkehr</h1>
     <p class="subtitle">
-      Fahrzeuge fahren auf der rechten Fahrbahnhälfte. Fasse ein Fahrzeug an und ziehe es an eine
-      andere Stelle — lässt du es auf der linken Straßenseite los, fährt es als Gegenverkehr in die
-      andere Richtung. Platziere Ampeln und Vorfahrtsschilder frei auf der Strecke; Ampeln schaltest
+      Zum Start fährt schon etwa die Hälfte der Fahrzeuge als Gegenverkehr auf der linken Spur. Fasse
+      ein Fahrzeug an und ziehe es an eine andere Stelle — die Straßenseite beim Loslassen bestimmt
+      seine Fahrtrichtung. Platziere Ampeln und Vorfahrtsschilder frei auf der Strecke; Ampeln schaltest
       du manuell per Klick zwischen Rot und Grün.
     </p>
   </header>
@@ -642,13 +642,25 @@
     BASE_V0_KMH = limitKmh;
     const baseV0 = limitKmh / 3.6; // desired speed in m/s
 
+    // Roughly half the vehicles start on each lane, each half evenly spaced
+    // along its own direction of travel (the two groups are offset from one
+    // another so they don't all render at the same points along the road).
+    const forwardCount = Math.ceil(N / 2);
+    const reverseCount = N - forwardCount;
+
     vehicles = [];
     for (let i = 0; i < N; i++) {
+      const isReverse = i >= forwardCount;
+      const direction = isReverse ? -1 : 1;
+      const groupSize = isReverse ? reverseCount : forwardCount;
+      const groupIndex = isReverse ? i - forwardCount : i;
+      const stagger = isReverse && groupSize > 0 ? (TRACK_LENGTH / groupSize) / 2 : 0;
+
       const v0Factor = 0.92 + Math.random() * 0.16; // heterogeneous drivers
       const v = {
-        pos: (TRACK_LENGTH / N) * i,
+        pos: groupSize > 0 ? (TRACK_LENGTH / groupSize) * groupIndex + stagger : 0,
         speed: baseV0 * (0.9 + Math.random() * 0.1),
-        direction: 1,            // 1 = forward (right lane), -1 = oncoming (left lane)
+        direction: direction,    // 1 = forward (right lane), -1 = oncoming (left lane)
         v0Factor: v0Factor,
         v0DeltaKmh: 0,
         v0: baseV0 * v0Factor,
