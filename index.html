@@ -87,6 +87,7 @@
     display: block;
     width: 100%;
     height: auto;
+    touch-action: none;
   }
 
   .panels {
@@ -390,8 +391,10 @@
     <p class="eyebrow">Prototyp · 02</p>
     <h1>Ampeln, Vorfahrt und echter Rechtsverkehr</h1>
     <p class="subtitle">
-      Fahrzeuge fahren jetzt auf der rechten Fahrbahnhälfte statt mittig. Platziere Ampeln und
-      Vorfahrtsschilder frei auf der Strecke — Ampeln schaltest du manuell per Klick zwischen Rot und Grün.
+      Fahrzeuge fahren auf der rechten Fahrbahnhälfte. Fasse ein Fahrzeug an und ziehe es an eine
+      andere Stelle — lässt du es auf der linken Straßenseite los, fährt es als Gegenverkehr in die
+      andere Richtung. Platziere Ampeln und Vorfahrtsschilder frei auf der Strecke; Ampeln schaltest
+      du manuell per Klick zwischen Rot und Grün.
     </p>
   </header>
 
@@ -420,6 +423,7 @@
       <p class="inspector-empty" id="inspector-empty">Klicke auf ein Fahrzeug in der Simulation, um es zu bremsen oder seine Werte anzupassen.</p>
       <div class="inspector-body" id="inspector-body">
         <div class="hud-row"><span class="label">Fahrzeug</span><span class="value" id="insp-id">—</span></div>
+        <div class="hud-row"><span class="label">Richtung</span><span class="value" id="insp-dir">—</span></div>
         <div class="hud-row"><span class="label">Aktuelles Tempo</span><span class="value" id="insp-speed">—</span></div>
         <div class="hud-row"><span class="label">Richtgeschwindigkeit</span><span class="value" id="insp-v0">—</span></div>
         <div class="hud-row"><span class="label">Sicherheitsabstand</span><span class="value" id="insp-s0">—</span></div>
@@ -463,14 +467,21 @@
     <p class="element-hint" id="element-hint">
       Klicke auf die Straße, um zu platzieren. Klicke ein vorhandenes Element an, um es zu entfernen.
       Außerhalb des Platzierungsmodus schaltet ein Klick auf eine Ampel sie zwischen Rot und Grün um.
+      Ein Fahrzeug lässt sich zusätzlich anfassen und verschieben — die Straßenseite beim Loslassen
+      bestimmt die Fahrtrichtung.
     </p>
   </div>
 
   <footer>
     <strong>Was hier passiert:</strong> Jedes Fahrzeug reagiert nur auf den Abstand und die Geschwindigkeit
-    des Vordermanns oder einer roten Ampel (IDM-Formel von Treiber et al.). Es gibt keine zentrale Steuerung.
-    Wähle ein Fahrzeug aus und greife manuell ein, oder platziere Ampeln auf der Strecke — beides reicht,
-    damit sich eine sich selbst erhaltende Stauwelle bildet. Das ist der klassische „Phantomstau".
+    des Vordermanns oder einer roten Ampel (IDM-Formel von Treiber et al.) — Gegenverkehr auf der linken
+    Spur wird dabei komplett unabhängig von der rechten Spur simuliert, beide Richtungen halten aber an
+    derselben roten Ampel. Löst sich eine Blockade durch eine Ampel, beschleunigt das Fahrzeug für
+    einige Sekunden spürbar kräftiger, so wie Autofahrer es beim Anfahren tun — danach klingt der
+    Effekt wieder ab. Es gibt keine zentrale Steuerung: Wähle ein Fahrzeug aus und
+    greife manuell ein, verschiebe ein Fahrzeug an eine andere Stelle, oder platziere Ampeln auf der
+    Strecke — all das reicht, damit sich eine sich selbst erhaltende Stauwelle bildet.
+    Das ist der klassische „Phantomstau".
     <br><br>
     <strong>Hinweis zu Vorfahrtsschildern:</strong> Sie lassen sich schon platzieren, wirken aber noch nicht
     auf den Verkehr — echte Vorfahrtsregeln ergeben erst mit richtigen Kreuzungen Sinn, die mit dem
@@ -499,9 +510,9 @@
   const ROADSIDE_OFFSET = ROAD_WIDTH / 2 + 16;
 
   // Perpendicular unit vector pointing to the right of the direction of
-  // travel `heading`, in screen/canvas coordinates.
+  // travel `heading`, in screen/canvas coordinates (y grows downward).
   function rightOf(heading) {
-    return { x: Math.sin(heading), y: -Math.cos(heading) };
+    return { x: -Math.sin(heading), y: Math.cos(heading) };
   }
 
   function laneOffsetPoint(s, offsetAmount) {
@@ -580,6 +591,7 @@
   let simTime = 0;
   let selectedIndex = null;
   let brakingIndex = null;
+  let draggingIndex = null;   // vehicle currently being picked up and moved
 
   // ---------- Road furniture: traffic lights & right-of-way signs ----------
   // Both persist across "Simulation neu starten" (that only re-rolls the
@@ -624,12 +636,15 @@
       const v = {
         pos: (TRACK_LENGTH / N) * i,
         speed: baseV0 * (0.9 + Math.random() * 0.1),
+        direction: 1,            // 1 = forward (right lane), -1 = oncoming (left lane)
         v0Factor: v0Factor,
         v0DeltaKmh: 0,
         v0: baseV0 * v0Factor,
         s0Percent: 0,           // relative deviation from default safety gap, in %
         s0: IDM.s0,
-        length: IDM.vehicleLength
+        length: IDM.vehicleLength,
+        lightBoostTimer: 0,      // seconds of post-light acceleration boost remaining
+        wasBlockedByLight: false
       };
       vehicles.push(v);
     }
@@ -653,18 +668,36 @@
     updateLegend();
   }
 
-  // Shortest signed distance on the ring: positive if `leader` is ahead of
-  // `v` along the driving direction, negative if they already overlap.
+  // Shortest signed distance to `leader` *in v's own direction of travel*,
+  // positive if leader is ahead, negative if they already overlap.
   // (A plain modulo gap breaks down right at the moment of a near-collision:
   // a tiny negative raw gap would wrap around to "almost a full lap of free
   // road", which is exactly what let vehicles drive straight through each
   // other during hard braking.)
   function signedGap(v, leader) {
-    let raw = leader.pos - v.pos - leader.length;
+    const dir = v.direction || 1;
+    let raw = dir === 1
+      ? (leader.pos - v.pos - leader.length)
+      : (v.pos - leader.pos - leader.length);
     const half = TRACK_LENGTH / 2;
     while (raw > half) raw -= TRACK_LENGTH;
     while (raw < -half) raw += TRACK_LENGTH;
     return raw;
+  }
+
+  // Drivers pull away noticeably harder right after a traffic light than
+  // they accelerate normally on the open road. Rather than "boosted as long
+  // as you're within X meters of a light" (which re-triggers over and over
+  // for every small creep forward in a queue and never seems to stop), this
+  // fires once, at the moment a vehicle stops being blocked by a red light,
+  // and fades out over a fixed real-time window.
+  const LIGHT_BOOST_DURATION = 3;   // seconds the boost lasts after release
+  const LIGHT_BOOST_MAX = 0.6;      // up to +60% acceleration right after release
+  const MAX_ACCEL_BOOSTED = IDM.a * (1 + LIGHT_BOOST_MAX);
+
+  function lightBoostFactor(v) {
+    if (!v.lightBoostTimer || v.lightBoostTimer <= 0) return 1;
+    return 1 + LIGHT_BOOST_MAX * (v.lightBoostTimer / LIGHT_BOOST_DURATION);
   }
 
   function idmAccel(v, leader) {
@@ -673,62 +706,90 @@
     const sStar = v.s0 + Math.max(0, v.speed * IDM.T + (v.speed * dv) / (2 * Math.sqrt(IDM.a * IDM.b)));
     const safeGap = Math.max(gap, 0.1); // floor avoids div-by-zero/negative, forces max braking when very close
     let accel = IDM.a * (1 - Math.pow(v.speed / v.v0, IDM.delta) - Math.pow(sStar / safeGap, 2));
-    return Math.max(-8, Math.min(IDM.a, accel));
+    if (accel > 0) accel *= lightBoostFactor(v);
+    return Math.max(-8, Math.min(MAX_ACCEL_BOOSTED, accel));
   }
 
   function step(dt) {
     simTime += dt;
 
-    // Build a combined list of everything that can act as a "leader" a real
-    // vehicle might have to follow: every other vehicle, plus a zero-length,
-    // zero-speed virtual obstacle for every currently red traffic light.
-    // Green lights simply don't appear in this list, so vehicles fall back
-    // to following the next real vehicle ahead once a light turns green.
-    const entities = vehicles.map((v, i) => ({ kind: 'car', idx: i, pos: v.pos, speed: v.speed, length: v.length }));
-    for (const light of trafficLights) {
-      if (light.state === 'red') {
-        entities.push({ kind: 'light', pos: light.s, speed: 0, length: 0 });
+    // Split into the two direction groups. Each group only ever follows
+    // other members of its own group (its own lane) plus red lights, which
+    // block both lanes since they sit across the whole road.
+    const forwardIdx = [];
+    const reverseIdx = [];
+    for (let i = 0; i < N; i++) {
+      (vehicles[i].direction === -1 ? reverseIdx : forwardIdx).push(i);
+    }
+
+    const leaderOf = new Array(N);
+
+    function assignLeaders(indices, dir) {
+      if (indices.length === 0) return;
+      const entities = indices.map(i => ({
+        kind: 'car', idx: i, pos: vehicles[i].pos, speed: vehicles[i].speed, length: vehicles[i].length
+      }));
+      for (const light of trafficLights) {
+        if (light.state === 'red') entities.push({ kind: 'light', pos: light.s, speed: 0, length: 0 });
+      }
+      entities.sort((a, b) => a.pos - b.pos);
+      const M = entities.length;
+      const posInEntities = new Map();
+      for (let k = 0; k < M; k++) if (entities[k].kind === 'car') posInEntities.set(entities[k].idx, k);
+      for (const i of indices) {
+        const k = posInEntities.get(i);
+        // Forward vehicles follow the next entity going "up" in position;
+        // reverse vehicles move toward decreasing position, so their leader
+        // is the next entity going "down".
+        leaderOf[i] = dir === 1 ? entities[(k + 1) % M] : entities[(k - 1 + M) % M];
       }
     }
 
-    entities.sort((a, b) => a.pos - b.pos);
-    const M = entities.length;
+    assignLeaders(forwardIdx, 1);
+    assignLeaders(reverseIdx, -1);
 
-    // For each real vehicle, find the closest entity ahead of it (car or red light).
-    const leaderOf = new Array(N);
-    const entityByCarIdx = new Array(N);
-    for (let k = 0; k < M; k++) {
-      if (entities[k].kind === 'car') entityByCarIdx[entities[k].idx] = k;
-    }
+    // Detect the moment each vehicle stops being blocked by a red light
+    // (either it turned green, or the vehicle is now following a car
+    // instead) and arm its one-shot acceleration boost right then.
     for (let i = 0; i < N; i++) {
-      const k = entityByCarIdx[i];
-      leaderOf[i] = entities[(k + 1) % M];
+      const isBlockedByLight = !!(leaderOf[i] && leaderOf[i].kind === 'light');
+      if (vehicles[i].wasBlockedByLight && !isBlockedByLight) {
+        vehicles[i].lightBoostTimer = LIGHT_BOOST_DURATION;
+      }
+      vehicles[i].wasBlockedByLight = isBlockedByLight;
     }
 
     const accels = new Array(N);
     for (let i = 0; i < N; i++) {
-      accels[i] = idmAccel(vehicles[i], leaderOf[i]);
+      accels[i] = (draggingIndex === i) ? 0 : idmAccel(vehicles[i], leaderOf[i]);
     }
-    if (brakingIndex !== null && vehicles[brakingIndex]) {
+    if (brakingIndex !== null && vehicles[brakingIndex] && draggingIndex !== brakingIndex) {
       // Driver actively holds the brake — overrides the car-following model
       // for as long as the button stays pressed.
       accels[brakingIndex] = -6;
     }
     for (let i = 0; i < N; i++) {
+      if (draggingIndex === i) { vehicles[i].speed = 0; continue; } // frozen while being picked up
       const v = vehicles[i];
       v.speed = Math.max(0, v.speed + accels[i] * dt);
-      v.pos = (v.pos + v.speed * dt) % TRACK_LENGTH;
+      v.pos = ((v.pos + v.direction * v.speed * dt) % TRACK_LENGTH + TRACK_LENGTH) % TRACK_LENGTH;
+      v.lightBoostTimer = Math.max(0, v.lightBoostTimer - dt);
     }
 
     // Defensive safety net: even with the corrected physics above, extreme
     // parameter combinations (very low safety gap + very hard braking) could
     // theoretically still overlap for a frame. Never allow a visible pass-through
-    // — this applies equally to real leader vehicles and red-light stop lines.
+    // — this applies equally to real leader vehicles and red-light stop lines,
+    // in either direction of travel.
     for (let i = 0; i < N; i++) {
+      if (draggingIndex === i) continue;
       const leader = leaderOf[i];
       const gap = signedGap(vehicles[i], leader);
       if (gap < 0) {
-        vehicles[i].pos = ((leader.pos - leader.length - 0.1) % TRACK_LENGTH + TRACK_LENGTH) % TRACK_LENGTH;
+        const dir = vehicles[i].direction;
+        vehicles[i].pos = dir === 1
+          ? ((leader.pos - leader.length - 0.1) % TRACK_LENGTH + TRACK_LENGTH) % TRACK_LENGTH
+          : ((leader.pos + leader.length + 0.1) % TRACK_LENGTH + TRACK_LENGTH) % TRACK_LENGTH;
         vehicles[i].speed = Math.min(vehicles[i].speed, leader.speed);
       }
     }
@@ -780,10 +841,12 @@
     ctx.stroke();
     ctx.setLineDash([]);
 
-    // vehicles — offset to the right-hand lane, not centered on the road
+    // vehicles — offset to the right-hand lane relative to their own
+    // direction of travel (reversed vehicles render on the opposite lane).
     for (let i = 0; i < vehicles.length; i++) {
       const v = vehicles[i];
-      const { x, y, heading } = laneOffsetPoint(v.pos, LANE_OFFSET);
+      const { x, y, heading } = laneOffsetPoint(v.pos, LANE_OFFSET * v.direction);
+      const renderHeading = heading + (v.direction === -1 ? Math.PI : 0);
 
       if (i === selectedIndex) {
         ctx.save();
@@ -800,7 +863,7 @@
 
       ctx.save();
       ctx.translate(x, y);
-      ctx.rotate(heading);
+      ctx.rotate(renderHeading);
       ctx.fillStyle = speedColor(v.speed);
       ctx.shadowColor = ctx.fillStyle;
       ctx.shadowBlur = 6;
@@ -899,6 +962,8 @@
     document.getElementById('insp-v0').textContent = (v.v0 * 3.6).toFixed(0) + ' km/h';
     document.getElementById('insp-s0').textContent =
       (v.s0Percent > 0 ? '+' : '') + v.s0Percent + '% (' + v.s0.toFixed(1) + ' m)';
+    const dirEl = document.getElementById('insp-dir');
+    if (dirEl) dirEl.textContent = v.direction === 1 ? 'Vorwärts (rechte Spur)' : 'Gegenverkehr (linke Spur)';
   }
 
   let lastT = null;
@@ -945,12 +1010,88 @@
     return nearestDist < radius ? nearest : -1;
   }
 
-  canvas.addEventListener('click', (e) => {
+  function canvasCoords(e) {
     const rect = canvas.getBoundingClientRect();
     const scaleX = canvas.width / rect.width;
     const scaleY = canvas.height / rect.height;
-    const clickX = (e.clientX - rect.left) * scaleX;
-    const clickY = (e.clientY - rect.top) * scaleY;
+    return { x: (e.clientX - rect.left) * scaleX, y: (e.clientY - rect.top) * scaleY };
+  }
+
+  function vehicleHitTest(x, y, radius) {
+    let nearest = -1, nearestDist = Infinity;
+    for (let i = 0; i < vehicles.length; i++) {
+      const p = laneOffsetPoint(vehicles[i].pos, LANE_OFFSET * vehicles[i].direction);
+      const d = Math.hypot(p.x - x, p.y - y);
+      if (d < nearestDist) { nearestDist = d; nearest = i; }
+    }
+    return nearestDist < radius ? nearest : -1;
+  }
+
+  // ---------- Picking up & repositioning a vehicle ----------
+  // A plain tap still selects a vehicle (handled by the 'click' listener
+  // below). Only once the pointer actually moves past a small threshold
+  // does it turn into a drag: the vehicle freezes, follows the pointer along
+  // the nearest point on the road, and which side of the centerline it's
+  // dropped on decides its direction of travel (right = forward, left =
+  // oncoming). Releasing the pointer resumes normal physics from there.
+  let pointerDownIdx = null;
+  let pointerDownX = 0, pointerDownY = 0;
+  let dragMoved = false;
+  const DRAG_THRESHOLD = 5;
+
+  canvas.addEventListener('pointerdown', (e) => {
+    if (placementMode) return;
+    const { x, y } = canvasCoords(e);
+    const idx = vehicleHitTest(x, y, 26);
+    if (idx !== -1) {
+      pointerDownIdx = idx;
+      pointerDownX = x;
+      pointerDownY = y;
+      dragMoved = false;
+    }
+  });
+
+  canvas.addEventListener('pointermove', (e) => {
+    if (pointerDownIdx === null) return;
+    const { x, y } = canvasCoords(e);
+
+    if (draggingIndex === null) {
+      if (Math.hypot(x - pointerDownX, y - pointerDownY) < DRAG_THRESHOLD) return;
+      draggingIndex = pointerDownIdx;
+      selectedIndex = draggingIndex;
+      vehicles[draggingIndex].speed = 0;
+      canvas.setPointerCapture(e.pointerId);
+    }
+
+    dragMoved = true;
+    let best = null, bestDist = Infinity;
+    for (const sample of TRACK_SAMPLES) {
+      const d = Math.hypot(sample.x - x, sample.y - y);
+      if (d < bestDist) { bestDist = d; best = sample; }
+    }
+    if (best) {
+      const p = trackPoint(best.s);
+      const r = rightOf(p.heading);
+      const dot = (x - p.x) * r.x + (y - p.y) * r.y;
+      vehicles[draggingIndex].pos = best.s;
+      vehicles[draggingIndex].direction = dot >= 0 ? 1 : -1;
+      vehicles[draggingIndex].speed = 0;
+    }
+  });
+
+  function endPointerInteraction() {
+    pointerDownIdx = null;
+    draggingIndex = null;
+  }
+  window.addEventListener('pointerup', endPointerInteraction);
+  window.addEventListener('pointercancel', endPointerInteraction);
+
+  canvas.addEventListener('click', (e) => {
+    // A drag just finished — swallow the synthetic click browsers fire
+    // afterward so it doesn't also toggle a light or re-select a vehicle.
+    if (dragMoved) { dragMoved = false; return; }
+
+    const { x: clickX, y: clickY } = canvasCoords(e);
 
     if (placementMode === 'light') {
       const hitIdx = hitTestList(trafficLights, clickX, clickY, ROADSIDE_OFFSET, 16);
@@ -986,18 +1127,9 @@
     const signIdx = hitTestList(yieldSigns, clickX, clickY, ROADSIDE_OFFSET, 16);
     if (signIdx !== -1) return;
 
-    // Otherwise, select the nearest vehicle (vehicles render on the right lane).
-    let nearest = null;
-    let nearestDist = Infinity;
-    for (let i = 0; i < vehicles.length; i++) {
-      const { x, y } = laneOffsetPoint(vehicles[i].pos, LANE_OFFSET);
-      const d = Math.hypot(x - clickX, y - clickY);
-      if (d < nearestDist) {
-        nearestDist = d;
-        nearest = i;
-      }
-    }
-    selectedIndex = (nearest !== null && nearestDist < 26) ? nearest : null;
+    // Otherwise, select the nearest vehicle (each on its own lane side).
+    const nearest = vehicleHitTest(clickX, clickY, 26);
+    selectedIndex = nearest !== -1 ? nearest : null;
     updateInspector();
   });
 
