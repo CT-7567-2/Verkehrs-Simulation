@@ -452,6 +452,10 @@
       <label for="limit-slider">Tempolimit <span class="val" id="limit-val">90 km/h</span></label>
       <input type="range" id="limit-slider" min="30" max="150" step="5" value="90">
     </div>
+    <div class="control">
+      <label for="timescale-slider">Simulationsgeschwindigkeit <span class="val" id="timescale-val">1×</span></label>
+      <input type="range" id="timescale-slider" min="0" max="5" step="1" value="2">
+    </div>
     <button id="reset-btn">Simulation neu starten</button>
   </div>
 
@@ -1004,6 +1008,13 @@
     if (dirEl) dirEl.textContent = v.direction === 1 ? 'Vorwärts (rechte Spur)' : 'Gegenverkehr (linke Spur)';
   }
 
+  // ---------- Simulation speed (time scale) ----------
+  // Higher multipliers run several fixed-size physics steps per rendered
+  // frame instead of one giant step, so the IDM stays numerically stable
+  // (a single huge dt could let fast vehicles jump straight through gaps).
+  const TIME_SCALES = [0.25, 0.5, 1, 2, 4, 8];
+  let timeScale = 1;
+
   let lastT = null;
   function loop(t) {
     if (lastT === null) lastT = t;
@@ -1011,7 +1022,13 @@
     dt = Math.min(dt, 0.05); // avoid large jumps on tab refocus
     lastT = t;
 
-    step(dt);
+    if (timeScale >= 1) {
+      const subSteps = Math.round(timeScale);
+      for (let i = 0; i < subSteps; i++) step(dt);
+    } else {
+      step(dt * timeScale);
+    }
+
     draw();
     updateHud();
     updateInspector();
@@ -1022,8 +1039,10 @@
   // ---------- Controls ----------
   const countSlider = document.getElementById('count-slider');
   const limitSlider = document.getElementById('limit-slider');
+  const timescaleSlider = document.getElementById('timescale-slider');
   const countVal = document.getElementById('count-val');
   const limitVal = document.getElementById('limit-val');
+  const timescaleVal = document.getElementById('timescale-val');
   const resetBtn = document.getElementById('reset-btn');
 
   countSlider.addEventListener('input', () => {
@@ -1032,6 +1051,10 @@
   limitSlider.addEventListener('input', () => {
     limitVal.textContent = limitSlider.value + ' km/h';
     applySpeedLimit(parseInt(limitSlider.value, 10));
+  });
+  timescaleSlider.addEventListener('input', () => {
+    timeScale = TIME_SCALES[parseInt(timescaleSlider.value, 10)];
+    timescaleVal.textContent = timeScale + '×';
   });
   resetBtn.addEventListener('click', () => {
     initSim(parseInt(countSlider.value, 10), parseInt(limitSlider.value, 10));
