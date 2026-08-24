@@ -766,24 +766,40 @@
       if (d < bestDist) { bestDist = d; best = sample; }
     }
     if (!best) return null;
+
+    // Determine which lane was clicked from the raw (unsnapped) point —
+    // this stays reliable even very close to a crossing, since it's
+    // essentially never exactly at the crossing's ambiguous center point.
+    const rawP = trackPoint(best.s);
+    const rawR = rightOf(rawP.heading);
+    const side = ((x - rawP.x) * rawR.x + (y - rawP.y) * rawR.y) >= 0 ? 1 : -1;
+
     let s = best.s;
 
-    // Snap to the exact crossing-arm coordinate when placing close to an
-    // intersection, so lights/signs line up precisely with the stop line
-    // the right-of-way logic actually checks against.
+    // Snap close to a crossing-arm's stop line, but a little *before* it
+    // rather than exactly on top of it. Right at the crossing point the two
+    // arms physically overlap, so the road's direction is ambiguous there —
+    // that ambiguity was making signs appear to stand in the middle of the
+    // intersection with no reliable effect. Which side of the branch counts
+    // as "before" depends on the lane clicked (forward traffic arrives from
+    // lower s, oncoming traffic from higher s), not on which arm-half the
+    // click happened to land nearest to.
     const SNAP_RANGE = 40;
+    const STOPLINE_OFFSET = 26;
     for (const crossing of currentTrackDef.crossings) {
       for (const branchS of crossing.branches) {
-        let d2 = Math.abs(s - branchS);
-        d2 = Math.min(d2, TRACK_LENGTH - d2);
-        if (d2 < SNAP_RANGE) { s = branchS; break; }
+        let delta = s - branchS;
+        if (delta > TRACK_LENGTH / 2) delta -= TRACK_LENGTH;
+        if (delta < -TRACK_LENGTH / 2) delta += TRACK_LENGTH;
+        if (Math.abs(delta) < SNAP_RANGE) {
+          const approachSign = side === 1 ? -1 : 1;
+          s = ((branchS + approachSign * STOPLINE_OFFSET) % TRACK_LENGTH + TRACK_LENGTH) % TRACK_LENGTH;
+          break;
+        }
       }
     }
 
-    const p = trackPoint(s);
-    const r = rightOf(p.heading);
-    const dot = (x - p.x) * r.x + (y - p.y) * r.y;
-    return { s, side: dot >= 0 ? 1 : -1 };
+    return { s, side };
   }
 
   // Switches to a different track layout: rebuilds the geometry, clears any
