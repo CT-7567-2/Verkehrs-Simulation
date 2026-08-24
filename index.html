@@ -496,16 +496,20 @@
       <label>Streckenelemente</label>
       <div class="element-buttons">
         <button id="place-light-btn" class="place-btn">🚦 Ampel platzieren</button>
-        <button id="place-sign-btn" class="place-btn">🔶 Vorfahrtsschild platzieren</button>
+        <button id="place-priority-btn" class="place-btn">🔶 Vorfahrtsstraße platzieren</button>
+        <button id="place-yield-btn" class="place-btn">🔻 Vorfahrt-achten platzieren</button>
         <button id="clear-elements-btn" class="inspector-link" style="margin-top:2px;">Alle Elemente entfernen</button>
       </div>
     </div>
     <p class="element-hint" id="element-hint">
       Klicke auf die Straße, um zu platzieren — je nachdem, auf welcher Seite du klickst, wirkt das
-      Element nur auf diese Fahrtrichtung. Klicke ein vorhandenes Element an, um es zu entfernen.
-      Außerhalb des Platzierungsmodus schaltet ein Klick auf eine Ampel sie zwischen Rot und Grün um.
-      Ein Fahrzeug lässt sich zusätzlich anfassen und verschieben — die Straßenseite beim Loslassen
-      bestimmt die Fahrtrichtung.
+      Element nur auf diese Fahrtrichtung. Nahe einer Kreuzung rastet die Platzierung automatisch genau
+      auf den Kreuzungsarm ein. Klicke ein vorhandenes Element an, um es zu entfernen. Außerhalb des
+      Platzierungsmodus schaltet ein Klick auf eine Ampel sie zwischen Rot und Grün um. An einer Kreuzung
+      erzwingt eine Vorfahrtsstraße freie Fahrt für ihre Seite, während Vorfahrt-achten-Schilder auf der
+      Gegenseite immer warten müssen; ohne Schilder gilt automatisch „wer zuerst da ist". Ein Fahrzeug
+      lässt sich zusätzlich anfassen und verschieben — die Straßenseite beim Loslassen bestimmt die
+      Fahrtrichtung.
     </p>
   </div>
 
@@ -522,13 +526,13 @@
     Das ist der klassische „Phantomstau".
     <br><br>
     <strong>Kreuzung (Doppelschleife):</strong> An der einen echten Kreuzung der Achterbahn-Strecke
-    treffen bis zu vier Verkehrsströme aufeinander (beide Fahrtrichtungen auf beiden Schleifen). Wer zuerst
-    nah genug herankommt, bekommt automatisch Vorfahrt; alle anderen warten, bis die Kreuzung wieder frei
-    ist — ganz ohne Ampeln, wie eine unbeschilderte Kreuzung im echten Verkehr.
-    <br><br>
-    <strong>Hinweis zu Vorfahrtsschildern:</strong> Sie lassen sich weiterhin frei platzieren, wirken aber
-    noch nicht auf die automatische Vorfahrtsregelung an der Kreuzung — das ist der nächste logische
-    Ausbauschritt.
+    treffen bis zu vier Verkehrsströme aufeinander (beide Fahrtrichtungen auf beiden Schleifen). Ohne
+    Beschilderung gilt automatisch „wer zuerst nah genug herankommt" — wie eine unbeschilderte Kreuzung
+    im echten Verkehr. Platzierst du eine <strong>Vorfahrtsstraße</strong> (gelbe Raute) auf einer Seite,
+    bekommt diese Fahrtrichtung dort immer bedingungslos Vorfahrt; ein <strong>Vorfahrt-achten-Schild</strong>
+    (rotes Dreieck) sorgt umgekehrt dafür, dass diese Richtung sich immer allen anderen unterordnet — auch
+    wenn sie eigentlich zuerst da wäre. Beides lässt sich in der Nähe der Kreuzung platzieren und rastet
+    automatisch exakt auf den jeweiligen Kreuzungsarm ein.
   </footer>
 </div>
 
@@ -738,9 +742,9 @@
   // Both persist across "Simulation neu starten" (that only re-rolls the
   // vehicles), and are cleared only via the explicit "Alle Elemente
   // entfernen" button.
-  let trafficLights = [];   // { s: arc-length position, state: 'red' | 'green' }
-  let yieldSigns = [];      // { s: arc-length position } — visual only for now
-  let placementMode = null; // null | 'light' | 'sign'
+  let trafficLights = [];   // { s: arc-length position, side, state: 'red' | 'green' }
+  let yieldSigns = [];      // { s: arc-length position, side, type: 'priority' | 'yield' }
+  let placementMode = null; // null | 'light' | 'priority' | 'yield'
 
   // Precomputed samples along the track, used to snap a click to the
   // nearest point on the road (so placed elements sit exactly on the path).
@@ -762,10 +766,24 @@
       if (d < bestDist) { bestDist = d; best = sample; }
     }
     if (!best) return null;
-    const p = trackPoint(best.s);
+    let s = best.s;
+
+    // Snap to the exact crossing-arm coordinate when placing close to an
+    // intersection, so lights/signs line up precisely with the stop line
+    // the right-of-way logic actually checks against.
+    const SNAP_RANGE = 40;
+    for (const crossing of currentTrackDef.crossings) {
+      for (const branchS of crossing.branches) {
+        let d2 = Math.abs(s - branchS);
+        d2 = Math.min(d2, TRACK_LENGTH - d2);
+        if (d2 < SNAP_RANGE) { s = branchS; break; }
+      }
+    }
+
+    const p = trackPoint(s);
     const r = rightOf(p.heading);
     const dot = (x - p.x) * r.x + (y - p.y) * r.y;
-    return { s: best.s, side: dot >= 0 ? 1 : -1 };
+    return { s, side: dot >= 0 ? 1 : -1 };
   }
 
   // Switches to a different track layout: rebuilds the geometry, clears any
@@ -779,10 +797,10 @@
     trafficLights = [];
     yieldSigns = [];
     placementMode = null;
-    const lb = document.getElementById('place-light-btn');
-    const sb = document.getElementById('place-sign-btn');
-    if (lb) lb.classList.remove('active');
-    if (sb) sb.classList.remove('active');
+    for (const id of ['place-light-btn', 'place-priority-btn', 'place-yield-btn']) {
+      const btn = document.getElementById(id);
+      if (btn) btn.classList.remove('active');
+    }
     initSim(N, BASE_V0_KMH);
   }
 
@@ -922,12 +940,33 @@
     // A crossing's two `branches` are the two arc-length points where the
     // single path passes back through the same physical spot. Up to four
     // approach flows meet there (each branch, each direction of travel).
-    // Whoever gets closest first "claims" the intersection; everyone else
-    // approaching gets a virtual stop placed right at their own branch —
-    // built the exact same way a red light is, so all the existing braking,
-    // queueing and post-stop acceleration boost logic applies for free.
+    //
+    // Without signs, whoever gets closest first claims the intersection
+    // (a reasonable stand-in for an unmarked crossing). A "Vorfahrtsstraße"
+    // sign gives its flow unconditional priority — it is never made to
+    // yield — while a "Vorfahrt achten" sign always yields to every other
+    // flow present, signed or not. Everyone who has to wait gets a virtual
+    // stop placed right at their own branch — built the exact same way a
+    // red light is, so all the existing braking, queueing and post-stop
+    // acceleration boost logic applies for free.
     const INTERSECTION_APPROACH = 70;
     const INTERSECTION_CLEARANCE = CAR_LENGTH + 10;
+    const SIGN_MATCH_RANGE = 90; // a sign this close before a branch, on the matching side, governs that flow
+
+    function flowRank(branchS, direction) {
+      let rank = 1; // default: unmarked, negotiates via first-come-first-served
+      for (const sign of yieldSigns) {
+        if (sign.side !== direction) continue;
+        let d = direction === 1 ? (branchS - sign.s) : (sign.s - branchS);
+        d = ((d % TRACK_LENGTH) + TRACK_LENGTH) % TRACK_LENGTH;
+        if (d < SIGN_MATCH_RANGE) {
+          if (sign.type === 'priority') return 2;   // unconditional priority wins immediately
+          if (sign.type === 'yield') rank = 0;
+        }
+      }
+      return rank;
+    }
+
     for (const crossing of currentTrackDef.crossings) {
       if (crossing.occupant) {
         const v = vehicles[crossing.occupant.idx];
@@ -947,13 +986,20 @@
         for (const branchS of crossing.branches) {
           let d = v.direction === 1 ? (branchS - v.pos) : (v.pos - branchS);
           d = ((d % TRACK_LENGTH) + TRACK_LENGTH) % TRACK_LENGTH;
-          if (d < INTERSECTION_APPROACH) approachers.push({ idx: i, branchS, dist: d, direction: v.direction });
+          if (d < INTERSECTION_APPROACH) {
+            approachers.push({ idx: i, branchS, dist: d, direction: v.direction, rank: flowRank(branchS, v.direction) });
+          }
         }
       }
 
       if (!crossing.occupant && approachers.length > 0) {
-        approachers.sort((a, b) => a.dist - b.dist);
-        crossing.occupant = { idx: approachers[0].idx, branchS: approachers[0].branchS };
+        // Only the highest-ranked flow currently present may claim the
+        // intersection — a priority-signed flow always outranks everyone
+        // else; among equally-ranked approachers, closest goes first.
+        const maxRank = Math.max(...approachers.map(a => a.rank));
+        const eligible = approachers.filter(a => a.rank === maxRank);
+        eligible.sort((a, b) => a.dist - b.dist);
+        crossing.occupant = { idx: eligible[0].idx, branchS: eligible[0].branchS };
       }
 
       crossing.yieldStops = approachers.filter(a => !(crossing.occupant && a.idx === crossing.occupant.idx));
@@ -1144,25 +1190,40 @@
       ctx.restore();
     }
 
-    // yield / right-of-way signs (visual only for now — see footer note)
+    // right-of-way signs: yellow diamond = priority road, red triangle = yield
     for (const sign of yieldSigns) {
       const { x, y } = laneOffsetPoint(sign.s, ROADSIDE_OFFSET * sign.side);
       ctx.save();
       ctx.translate(x, y);
       ctx.shadowColor = '#000';
       ctx.shadowBlur = 3;
-      ctx.fillStyle = '#f5c518';
-      ctx.strokeStyle = '#1a1300';
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      const r = 9;
-      ctx.moveTo(0, -r);
-      ctx.lineTo(r, 0);
-      ctx.lineTo(0, r);
-      ctx.lineTo(-r, 0);
-      ctx.closePath();
-      ctx.fill();
-      ctx.stroke();
+      if (sign.type === 'yield') {
+        // downward-pointing triangle, like the real "Vorfahrt gewähren" sign
+        ctx.fillStyle = '#fdfdfb';
+        ctx.strokeStyle = '#dc2626';
+        ctx.lineWidth = 2.5;
+        ctx.beginPath();
+        const r = 10;
+        ctx.moveTo(-r, -r * 0.7);
+        ctx.lineTo(r, -r * 0.7);
+        ctx.lineTo(0, r * 0.9);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+      } else {
+        ctx.fillStyle = '#f5c518';
+        ctx.strokeStyle = '#1a1300';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        const r = 9;
+        ctx.moveTo(0, -r);
+        ctx.lineTo(r, 0);
+        ctx.lineTo(0, r);
+        ctx.lineTo(-r, 0);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+      }
       ctx.restore();
     }
 
@@ -1401,13 +1462,13 @@
       return;
     }
 
-    if (placementMode === 'sign') {
+    if (placementMode === 'priority' || placementMode === 'yield') {
       const hitIdx = hitTestList(yieldSigns, clickX, clickY, 16);
       if (hitIdx !== -1) {
         yieldSigns.splice(hitIdx, 1);
       } else {
         const hit = nearestTrackPos(clickX, clickY);
-        if (hit) yieldSigns.push({ s: hit.s, side: hit.side });
+        if (hit) yieldSigns.push({ s: hit.s, side: hit.side, type: placementMode });
       }
       return;
     }
@@ -1419,8 +1480,9 @@
       return;
     }
 
-    // Clicking a sign currently does nothing functional — consume the click
-    // so it doesn't accidentally select a distant vehicle instead.
+    // Clicking a sign outside placement mode currently does nothing beyond
+    // that — consume the click so it doesn't accidentally select a distant
+    // vehicle instead.
     const signIdx = hitTestList(yieldSigns, clickX, clickY, 16);
     if (signIdx !== -1) return;
 
@@ -1432,18 +1494,22 @@
 
   // ---------- Placement mode toggles ----------
   const placeLightBtn = document.getElementById('place-light-btn');
-  const placeSignBtn = document.getElementById('place-sign-btn');
+  const placePriorityBtn = document.getElementById('place-priority-btn');
+  const placeYieldBtn = document.getElementById('place-yield-btn');
+  const placementButtons = [
+    { mode: 'light', btn: placeLightBtn },
+    { mode: 'priority', btn: placePriorityBtn },
+    { mode: 'yield', btn: placeYieldBtn }
+  ];
 
-  placeLightBtn.addEventListener('click', () => {
-    placementMode = placementMode === 'light' ? null : 'light';
-    placeLightBtn.classList.toggle('active', placementMode === 'light');
-    placeSignBtn.classList.remove('active');
-  });
-  placeSignBtn.addEventListener('click', () => {
-    placementMode = placementMode === 'sign' ? null : 'sign';
-    placeSignBtn.classList.toggle('active', placementMode === 'sign');
-    placeLightBtn.classList.remove('active');
-  });
+  function setPlacementMode(mode) {
+    placementMode = placementMode === mode ? null : mode;
+    for (const p of placementButtons) p.btn.classList.toggle('active', placementMode === p.mode);
+  }
+  placeLightBtn.addEventListener('click', () => setPlacementMode('light'));
+  placePriorityBtn.addEventListener('click', () => setPlacementMode('priority'));
+  placeYieldBtn.addEventListener('click', () => setPlacementMode('yield'));
+
   document.getElementById('clear-elements-btn').addEventListener('click', () => {
     trafficLights = [];
     yieldSigns = [];
