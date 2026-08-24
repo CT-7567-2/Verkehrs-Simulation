@@ -968,6 +968,7 @@
     const INTERSECTION_APPROACH = 70;
     const INTERSECTION_CLEARANCE = CAR_LENGTH + 10;
     const SIGN_MATCH_RANGE = 90; // a sign this close before a branch, on the matching side, governs that flow
+    const STOPLINE_SETBACK = 20; // how far before the crossing's center a yielding vehicle actually stops
 
     function flowRank(branchS, direction) {
       let rank = 1; // default: unmarked, negotiates via first-come-first-served
@@ -1018,7 +1019,11 @@
         crossing.occupant = { idx: eligible[0].idx, branchS: eligible[0].branchS };
       }
 
-      crossing.yieldStops = approachers.filter(a => !(crossing.occupant && a.idx === crossing.occupant.idx));
+      // Only cross-traffic from the *other* branch has to wait — the two
+      // directions of the same branch sit on separate lanes and never
+      // actually cross paths with each other here, so once one of them has
+      // claimed the crossing, its oncoming counterpart is free to go too.
+      crossing.yieldStops = approachers.filter(a => crossing.occupant && a.branchS !== crossing.occupant.branchS);
     }
 
     const leaderOf = new Array(N);
@@ -1035,7 +1040,13 @@
       }
       for (const crossing of currentTrackDef.crossings) {
         for (const stop of crossing.yieldStops) {
-          if (stop.direction === dir) entities.push({ kind: 'light', pos: stop.branchS, speed: 0, length: 0 });
+          if (stop.direction !== dir) continue;
+          // Stop a little before the crossing's exact center, not on top of
+          // it — otherwise a yielding vehicle's reference point comes to
+          // rest right in the middle of the intersection instead of before it.
+          const setback = dir === 1 ? stop.branchS - STOPLINE_SETBACK : stop.branchS + STOPLINE_SETBACK;
+          const pos = ((setback % TRACK_LENGTH) + TRACK_LENGTH) % TRACK_LENGTH;
+          entities.push({ kind: 'light', pos, speed: 0, length: 0 });
         }
       }
       entities.sort((a, b) => a.pos - b.pos);
