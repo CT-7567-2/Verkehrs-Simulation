@@ -400,6 +400,38 @@
     flex: 1 1 260px;
   }
 
+  .parking-lot {
+    display: flex;
+    flex-wrap: wrap;
+    align-content: flex-start;
+    gap: 5px;
+    flex: 1 1 200px;
+    max-width: 240px;
+    min-height: 24px;
+  }
+
+  .parking-car {
+    width: 16px;
+    height: 9px;
+    border-radius: 2px;
+    background: #5a6472;
+    border: 1px solid #3a414c;
+    flex-shrink: 0;
+  }
+
+  .parking-more {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    color: var(--text-muted);
+    align-self: center;
+  }
+
+  #parking-panel.drag-over {
+    border-color: var(--marking);
+    background: #1c1710;
+    box-shadow: 0 0 0 2px var(--marking) inset;
+  }
+
   footer {
     max-width: 960px;
     width: 100%;
@@ -489,6 +521,20 @@
       <input type="range" id="timescale-slider" min="0" max="5" step="1" value="2">
     </div>
     <button id="reset-btn">Simulation neu starten</button>
+  </div>
+
+  <div class="controls" id="parking-panel">
+    <div class="control" style="flex: 1 1 260px;">
+      <label for="parking-slider">🅿️ Parkplatz <span class="val" id="parking-val">0</span></label>
+      <input type="range" id="parking-slider" min="0" max="30" step="1" value="0">
+    </div>
+    <p class="element-hint" style="flex: 1 1 320px;">
+      Fahrzeuge, die hier geparkt sind, zählen nicht zur Statistik. Den Regler nach rechts ziehen nimmt
+      Fahrzeuge live von der Straße; nach links ziehen lässt sie wieder losfahren. Noch gezielter geht's per
+      Drag & Drop: ein Fahrzeug auf der Strecke anfassen und direkt auf dieses Feld ziehen, um genau dieses
+      eine Fahrzeug zu entfernen.
+    </p>
+    <div class="parking-lot" id="parking-lot"></div>
   </div>
 
   <div class="controls">
@@ -842,6 +888,90 @@
     return pos;
   }
 
+  // ---------- Parking lot: live add/remove without a full reset ----------
+  // Parked vehicles simply don't exist in the `vehicles` array at all, so
+  // every statistic (averages, jam/stopped counts) automatically ignores
+  // them — there's nothing extra to filter out.
+  let parkedCount = 0;
+
+  function findSafeSpawnPos(direction) {
+    let pos = 0; // arbitrary fixed "parking lot exit" point on the loop
+    const minGap = CAR_LENGTH * 2;
+    const sameDir = vehicles.filter(v => v.direction === direction);
+    for (let attempts = 0; attempts < 300; attempts++) {
+      let blocked = false;
+      for (const v of sameDir) {
+        let d = Math.abs(v.pos - pos);
+        d = Math.min(d, TRACK_LENGTH - d);
+        if (d < minGap) { blocked = true; break; }
+      }
+      if (!blocked) break;
+      pos = (pos + minGap) % TRACK_LENGTH;
+    }
+    return avoidCrossingSpawn(pos);
+  }
+
+  function unparkVehicle() {
+    const forwardCount = vehicles.filter(v => v.direction === 1).length;
+    const reverseCount = vehicles.filter(v => v.direction === -1).length;
+    const direction = forwardCount <= reverseCount ? 1 : -1;
+    const v0Factor = 0.92 + Math.random() * 0.16;
+    vehicles.push({
+      pos: findSafeSpawnPos(direction),
+      speed: 0, // joins traffic from a standstill and accelerates in naturally
+      direction: direction,
+      v0Factor: v0Factor,
+      v0DeltaKmh: 0,
+      v0: (BASE_V0_KMH / 3.6) * v0Factor,
+      s0Percent: 0,
+      s0: IDM.s0,
+      length: IDM.vehicleLength,
+      lightBoostTimer: 0,
+      wasBlockedByLight: false
+    });
+    N = vehicles.length;
+  }
+
+  // Removes the vehicle at an arbitrary index and keeps every index-based
+  // reference (selection, braking, dragging, crossing occupancy) consistent
+  // afterwards — indices after the removed one shift down by one.
+  function removeVehicleAtIndex(idx) {
+    if (idx < 0 || idx >= vehicles.length) return false;
+    vehicles.splice(idx, 1);
+    N = vehicles.length;
+
+    function fix(ref) {
+      if (ref === idx) return null;
+      if (ref !== null && ref > idx) return ref - 1;
+      return ref;
+    }
+    selectedIndex = fix(selectedIndex);
+    brakingIndex = fix(brakingIndex);
+    draggingIndex = fix(draggingIndex);
+
+    for (const crossing of currentTrackDef.crossings) {
+      if (crossing.occupant) {
+        if (crossing.occupant.idx === idx) crossing.occupant = null;
+        else if (crossing.occupant.idx > idx) crossing.occupant.idx -= 1;
+      }
+    }
+    return true;
+  }
+
+  function parkVehicle() {
+    return removeVehicleAtIndex(vehicles.length - 1);
+  }
+
+  function updateParkingLotDisplay() {
+    const lot = document.getElementById('parking-lot');
+    if (!lot) return;
+    const MAX_ICONS = 24;
+    const shown = Math.min(parkedCount, MAX_ICONS);
+    let html = '<div class="parking-car"></div>'.repeat(shown);
+    if (parkedCount > MAX_ICONS) html += `<span class="parking-more">+${parkedCount - MAX_ICONS}</span>`;
+    lot.innerHTML = html;
+  }
+
   function initSim(count, limitKmh) {
     N = count;
     BASE_V0_KMH = limitKmh;
@@ -883,6 +1013,12 @@
     selectedIndex = null;
     brakingIndex = null;
     simTime = 0;
+    parkedCount = 0;
+    const parkingSliderEl = document.getElementById('parking-slider');
+    const parkingValEl = document.getElementById('parking-val');
+    if (parkingSliderEl) parkingSliderEl.value = 0;
+    if (parkingValEl) parkingValEl.textContent = '0';
+    updateParkingLotDisplay();
     updateLegend();
     updateInspector();
   }
@@ -1244,10 +1380,12 @@
       }
 
       const isStopped = v.speed * 3.6 < STOPPED_THRESHOLD_KMH;
+      const isPendingRemoval = i === draggingIndex && dragOverParkingLot;
 
       ctx.save();
       ctx.translate(x, y);
       ctx.rotate(renderHeading);
+      if (isPendingRemoval) ctx.globalAlpha = 0.3;
       ctx.fillStyle = isStopped ? '#ff1a1a' : speedColor(v.speed);
       ctx.shadowColor = ctx.fillStyle;
       ctx.shadowBlur = isStopped ? 10 : 6;
@@ -1428,6 +1566,31 @@
     initSim(parseInt(countSlider.value, 10), parseInt(limitSlider.value, 10));
   });
 
+  // ---------- Parking lot slider ----------
+  const parkingSlider = document.getElementById('parking-slider');
+  const parkingVal = document.getElementById('parking-val');
+
+  function setParkedCount(newCount) {
+    parkedCount = newCount;
+    parkingSlider.value = parkedCount;
+    parkingVal.textContent = parkedCount;
+    updateParkingLotDisplay();
+  }
+
+  parkingSlider.addEventListener('input', () => {
+    const target = parseInt(parkingSlider.value, 10);
+    let diff = target - parkedCount;
+    if (diff > 0) {
+      for (let i = 0; i < diff; i++) parkVehicle();
+    } else if (diff < 0) {
+      for (let i = 0; i < -diff; i++) unparkVehicle();
+    }
+    parkedCount = target;
+    parkingVal.textContent = parkedCount;
+    updateParkingLotDisplay();
+  });
+  updateParkingLotDisplay();
+
   // ---------- Vehicle selection & manual intervention ----------
   function hitTestList(list, x, y, radius) {
     let nearest = -1, nearestDist = Infinity;
@@ -1480,6 +1643,8 @@
     }
   });
 
+  let dragOverParkingLot = false;
+
   canvas.addEventListener('pointermove', (e) => {
     if (pointerDownIdx === null) return;
     const { x, y } = canvasCoords(e);
@@ -1493,6 +1658,20 @@
     }
 
     dragMoved = true;
+
+    // Dragging a vehicle onto the parking panel (anywhere in the page,
+    // outside the canvas) removes it instead of repositioning it on the
+    // road. Pointer capture keeps sending events to the canvas even while
+    // the cursor is visually over that panel, so we just compare the raw
+    // screen coordinates against its bounding box.
+    const parkingPanel = document.getElementById('parking-panel');
+    const rect = parkingPanel.getBoundingClientRect();
+    const overParking = e.clientX >= rect.left && e.clientX <= rect.right &&
+                         e.clientY >= rect.top && e.clientY <= rect.bottom;
+    dragOverParkingLot = overParking;
+    parkingPanel.classList.toggle('drag-over', overParking);
+    if (overParking) return; // freeze the vehicle in place while hovering the drop zone
+
     let best = null, bestDist = Infinity;
     for (const sample of TRACK_SAMPLES) {
       const d = Math.hypot(sample.x - x, sample.y - y);
@@ -1509,6 +1688,14 @@
   });
 
   function endPointerInteraction() {
+    if (draggingIndex !== null && dragOverParkingLot) {
+      if (removeVehicleAtIndex(draggingIndex)) {
+        setParkedCount(parkedCount + 1);
+      }
+    }
+    const parkingPanel = document.getElementById('parking-panel');
+    if (parkingPanel) parkingPanel.classList.remove('drag-over');
+    dragOverParkingLot = false;
     pointerDownIdx = null;
     draggingIndex = null;
   }
