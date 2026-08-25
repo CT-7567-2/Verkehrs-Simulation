@@ -1029,25 +1029,29 @@
         }
       }
 
-      // A vehicle this close to (or already past) where its stop line would
-      // be can no longer be expected to stop safely — it's already
-      // effectively committed to crossing. Let it through regardless of
-      // rank, and make everyone else (even a priority flow) wait for just
-      // that one vehicle instead of forcing a too-late stop mid-intersection.
-      const committed = approachers.filter(a => a.dist < STOPLINE_SETBACK);
-
       if (!crossing.occupant && approachers.length > 0) {
-        if (committed.length > 0) {
-          committed.sort((a, b) => a.dist - b.dist);
-          crossing.occupant = { idx: committed[0].idx, branchS: committed[0].branchS, forced: true };
+        // Who would naturally win by rank/distance if nobody were already
+        // stuck too close to stop?
+        const maxRank = Math.max(...approachers.map(a => a.rank));
+        const eligible = approachers.filter(a => a.rank === maxRank);
+        eligible.sort((a, b) => a.dist - b.dist);
+        const naturalChoice = eligible[0];
+
+        // Only treat "already too close to stop" as an override when it
+        // actually conflicts with a *different* branch that would otherwise
+        // win — if every approacher is on the same branch anyway (no real
+        // competing traffic), there's nothing to override, and forcing this
+        // path would wrongly stop the next vehicle in the same platoon for
+        // no reason.
+        const committedElsewhere = approachers.filter(
+          a => a.dist < STOPLINE_SETBACK && a.branchS !== naturalChoice.branchS
+        );
+
+        if (committedElsewhere.length > 0) {
+          committedElsewhere.sort((a, b) => a.dist - b.dist);
+          crossing.occupant = { idx: committedElsewhere[0].idx, branchS: committedElsewhere[0].branchS, forced: true };
         } else {
-          // Only the highest-ranked flow currently present may claim the
-          // intersection — a priority-signed flow always outranks everyone
-          // else; among equally-ranked approachers, closest goes first.
-          const maxRank = Math.max(...approachers.map(a => a.rank));
-          const eligible = approachers.filter(a => a.rank === maxRank);
-          eligible.sort((a, b) => a.dist - b.dist);
-          crossing.occupant = { idx: eligible[0].idx, branchS: eligible[0].branchS, forced: false };
+          crossing.occupant = { idx: naturalChoice.idx, branchS: naturalChoice.branchS, forced: false };
         }
       }
 
