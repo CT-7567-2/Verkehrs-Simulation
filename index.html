@@ -417,6 +417,22 @@
     background: #5a6472;
     border: 1px solid #3a414c;
     flex-shrink: 0;
+    cursor: grab;
+    touch-action: none;
+  }
+  .parking-car:hover { background: #6b7684; }
+
+  .parking-ghost {
+    position: fixed;
+    width: 18px;
+    height: 10px;
+    border-radius: 2px;
+    background: #e3b341;
+    border: 1px solid #7a5a10;
+    box-shadow: 0 0 8px rgba(227, 179, 65, 0.7);
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+    z-index: 9999;
   }
 
   .parking-more {
@@ -507,6 +523,21 @@
     </div>
   </div>
 
+  <div class="controls" id="parking-panel">
+    <div class="control" style="flex: 1 1 260px;">
+      <label for="parking-slider">🅿️ Parkplatz <span class="val" id="parking-val">0</span></label>
+      <input type="range" id="parking-slider" min="0" max="30" step="1" value="0">
+    </div>
+    <p class="element-hint" style="flex: 1 1 320px;">
+      Fahrzeuge, die hier geparkt sind, zählen nicht zur Statistik. Der Regler nimmt Fahrzeuge live von
+      der Straße oder lässt sie wieder losfahren. Für gezielte Kontrolle per Drag & Drop: ein Fahrzeug
+      auf der Strecke direkt auf dieses Feld ziehen, um es zu entfernen — oder umgekehrt ein geparktes
+      Fahrzeug aus diesem Feld greifen und an eine beliebige Stelle auf die Straße ziehen, um es dort
+      gezielt einzusetzen.
+    </p>
+    <div class="parking-lot" id="parking-lot"></div>
+  </div>
+
   <div class="controls">
     <div class="control">
       <label for="count-slider">Anzahl Fahrzeuge <span class="val" id="count-val">22</span></label>
@@ -521,20 +552,6 @@
       <input type="range" id="timescale-slider" min="0" max="5" step="1" value="2">
     </div>
     <button id="reset-btn">Simulation neu starten</button>
-  </div>
-
-  <div class="controls" id="parking-panel">
-    <div class="control" style="flex: 1 1 260px;">
-      <label for="parking-slider">🅿️ Parkplatz <span class="val" id="parking-val">0</span></label>
-      <input type="range" id="parking-slider" min="0" max="30" step="1" value="0">
-    </div>
-    <p class="element-hint" style="flex: 1 1 320px;">
-      Fahrzeuge, die hier geparkt sind, zählen nicht zur Statistik. Den Regler nach rechts ziehen nimmt
-      Fahrzeuge live von der Straße; nach links ziehen lässt sie wieder losfahren. Noch gezielter geht's per
-      Drag & Drop: ein Fahrzeug auf der Strecke anfassen und direkt auf dieses Feld ziehen, um genau dieses
-      eine Fahrzeug zu entfernen.
-    </p>
-    <div class="parking-lot" id="parking-lot"></div>
   </div>
 
   <div class="controls">
@@ -911,13 +928,10 @@
     return avoidCrossingSpawn(pos);
   }
 
-  function unparkVehicle() {
-    const forwardCount = vehicles.filter(v => v.direction === 1).length;
-    const reverseCount = vehicles.filter(v => v.direction === -1).length;
-    const direction = forwardCount <= reverseCount ? 1 : -1;
+  function createVehicle(pos, direction) {
     const v0Factor = 0.92 + Math.random() * 0.16;
-    vehicles.push({
-      pos: findSafeSpawnPos(direction),
+    return {
+      pos: pos,
       speed: 0, // joins traffic from a standstill and accelerates in naturally
       direction: direction,
       v0Factor: v0Factor,
@@ -928,7 +942,23 @@
       length: IDM.vehicleLength,
       lightBoostTimer: 0,
       wasBlockedByLight: false
-    });
+    };
+  }
+
+  function unparkVehicle() {
+    const forwardCount = vehicles.filter(v => v.direction === 1).length;
+    const reverseCount = vehicles.filter(v => v.direction === -1).length;
+    const direction = forwardCount <= reverseCount ? 1 : -1;
+    vehicles.push(createVehicle(findSafeSpawnPos(direction), direction));
+    N = vehicles.length;
+  }
+
+  // Places a new vehicle at an exact, user-chosen spot (used when dragging a
+  // parked vehicle straight onto the road) rather than searching for the
+  // nearest safe gap — same spirit as freely repositioning an existing
+  // vehicle, so no automatic collision avoidance here either.
+  function placeVehicleAt(pos, direction) {
+    vehicles.push(createVehicle(pos, direction));
     N = vehicles.length;
   }
 
@@ -1590,6 +1620,58 @@
     updateParkingLotDisplay();
   });
   updateParkingLotDisplay();
+
+  // ---------- Dragging a parked vehicle out onto the road ----------
+  // The icons are rebuilt on every count change, so listen on the
+  // container (event delegation) rather than on the icons themselves.
+  const parkingLotEl = document.getElementById('parking-lot');
+  let placingFromParking = false;
+  let placingGhost = null;
+
+  function moveGhostTo(clientX, clientY) {
+    if (placingGhost) {
+      placingGhost.style.left = clientX + 'px';
+      placingGhost.style.top = clientY + 'px';
+    }
+  }
+
+  parkingLotEl.addEventListener('pointerdown', (e) => {
+    if (!e.target.classList.contains('parking-car')) return;
+    if (parkedCount <= 0) return;
+    e.preventDefault();
+    placingFromParking = true;
+    placingGhost = document.createElement('div');
+    placingGhost.className = 'parking-ghost';
+    document.body.appendChild(placingGhost);
+    moveGhostTo(e.clientX, e.clientY);
+  });
+
+  window.addEventListener('pointermove', (e) => {
+    if (!placingFromParking) return;
+    moveGhostTo(e.clientX, e.clientY);
+  });
+
+  window.addEventListener('pointerup', (e) => {
+    if (!placingFromParking) return;
+    placingFromParking = false;
+    if (placingGhost) { placingGhost.remove(); placingGhost = null; }
+
+    const rect = canvas.getBoundingClientRect();
+    const overCanvas = e.clientX >= rect.left && e.clientX <= rect.right &&
+                        e.clientY >= rect.top && e.clientY <= rect.bottom;
+    if (!overCanvas) return; // dropped somewhere else — cancel, still parked
+
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    const x = (e.clientX - rect.left) * scaleX;
+    const y = (e.clientY - rect.top) * scaleY;
+
+    const hit = nearestTrackPos(x, y);
+    if (!hit) return;
+
+    placeVehicleAt(hit.s, hit.side);
+    setParkedCount(parkedCount - 1);
+  });
 
   // ---------- Vehicle selection & manual intervention ----------
   function hitTestList(list, x, y, radius) {
