@@ -824,6 +824,24 @@
     v.v0 = Math.max(3, BASE_V0_KMH * v.v0Factor + v.v0DeltaKmh) / 3.6;
   }
 
+  // Keeps a spawn position at least two car-lengths away from any crossing's
+  // stop line, so vehicles never start out already sitting on or right next
+  // to an intersection.
+  function avoidCrossingSpawn(pos) {
+    const EXCLUSION = CAR_LENGTH * 2;
+    for (const crossing of currentTrackDef.crossings) {
+      for (const branchS of crossing.branches) {
+        let d = pos - branchS;
+        if (d > TRACK_LENGTH / 2) d -= TRACK_LENGTH;
+        if (d < -TRACK_LENGTH / 2) d += TRACK_LENGTH;
+        if (Math.abs(d) < EXCLUSION) {
+          pos = ((branchS + EXCLUSION) % TRACK_LENGTH + TRACK_LENGTH) % TRACK_LENGTH;
+        }
+      }
+    }
+    return pos;
+  }
+
   function initSim(count, limitKmh) {
     N = count;
     BASE_V0_KMH = limitKmh;
@@ -843,9 +861,11 @@
       const groupIndex = isReverse ? i - forwardCount : i;
       const stagger = isReverse && groupSize > 0 ? (TRACK_LENGTH / groupSize) / 2 : 0;
 
+      const rawPos = groupSize > 0 ? (TRACK_LENGTH / groupSize) * groupIndex + stagger : 0;
+
       const v0Factor = 0.92 + Math.random() * 0.16; // heterogeneous drivers
       const v = {
-        pos: groupSize > 0 ? (TRACK_LENGTH / groupSize) * groupIndex + stagger : 0,
+        pos: avoidCrossingSpawn(rawPos),
         speed: baseV0 * (0.9 + Math.random() * 0.1),
         direction: direction,    // 1 = forward (right lane), -1 = oncoming (left lane)
         v0Factor: v0Factor,
@@ -965,10 +985,10 @@
     // stop placed right at their own branch — built the exact same way a
     // red light is, so all the existing braking, queueing and post-stop
     // acceleration boost logic applies for free.
-    const INTERSECTION_APPROACH = 70;
-    const INTERSECTION_CLEARANCE = CAR_LENGTH + 10;
+    const INTERSECTION_APPROACH = 130;
+    const INTERSECTION_CLEARANCE = CAR_LENGTH + ROAD_WIDTH; // must fully clear the physical intersection box, not just its center
     const SIGN_MATCH_RANGE = 90; // a sign this close before a branch, on the matching side, governs that flow
-    const STOPLINE_SETBACK = 20; // how far before the crossing's center a yielding vehicle actually stops
+    const STOPLINE_SETBACK = ROAD_WIDTH; // stop well clear of the intersection box, never partway into it
 
     function flowRank(branchS, direction) {
       let rank = 1; // default: unmarked, negotiates via first-come-first-served
@@ -1009,21 +1029,41 @@
         }
       }
 
+      // A vehicle this close to (or already past) where its stop line would
+      // be can no longer be expected to stop safely — it's already
+      // effectively committed to crossing. Let it through regardless of
+      // rank, and make everyone else (even a priority flow) wait for just
+      // that one vehicle instead of forcing a too-late stop mid-intersection.
+      const committed = approachers.filter(a => a.dist < STOPLINE_SETBACK);
+
       if (!crossing.occupant && approachers.length > 0) {
-        // Only the highest-ranked flow currently present may claim the
-        // intersection — a priority-signed flow always outranks everyone
-        // else; among equally-ranked approachers, closest goes first.
-        const maxRank = Math.max(...approachers.map(a => a.rank));
-        const eligible = approachers.filter(a => a.rank === maxRank);
-        eligible.sort((a, b) => a.dist - b.dist);
-        crossing.occupant = { idx: eligible[0].idx, branchS: eligible[0].branchS };
+        if (committed.length > 0) {
+          committed.sort((a, b) => a.dist - b.dist);
+          crossing.occupant = { idx: committed[0].idx, branchS: committed[0].branchS, forced: true };
+        } else {
+          // Only the highest-ranked flow currently present may claim the
+          // intersection — a priority-signed flow always outranks everyone
+          // else; among equally-ranked approachers, closest goes first.
+          const maxRank = Math.max(...approachers.map(a => a.rank));
+          const eligible = approachers.filter(a => a.rank === maxRank);
+          eligible.sort((a, b) => a.dist - b.dist);
+          crossing.occupant = { idx: eligible[0].idx, branchS: eligible[0].branchS, forced: false };
+        }
       }
 
-      // Only cross-traffic from the *other* branch has to wait — the two
-      // directions of the same branch sit on separate lanes and never
-      // actually cross paths with each other here, so once one of them has
-      // claimed the crossing, its oncoming counterpart is free to go too.
-      crossing.yieldStops = approachers.filter(a => crossing.occupant && a.branchS !== crossing.occupant.branchS);
+      // Normally, only cross-traffic from the *other* branch has to wait —
+      // the two directions of the same branch sit on separate lanes and
+      // never actually cross paths with each other here, so once one of
+      // them has claimed the crossing, its oncoming counterpart is free to
+      // go too. But if the crossing was claimed as a forced safety
+      // exception for one specific committed vehicle, nobody else gets to
+      // ride along on that — everyone but that exact vehicle waits,
+      // including the rest of its own non-priority lane.
+      crossing.yieldStops = approachers.filter(a => {
+        if (!crossing.occupant || a.idx === crossing.occupant.idx) return false;
+        if (crossing.occupant.forced) return true;
+        return a.branchS !== crossing.occupant.branchS;
+      });
     }
 
     const leaderOf = new Array(N);
