@@ -499,10 +499,11 @@
         Wähle ein Werkzeug — es bleibt aktiv, bis du ein anderes wählst. „Straße bauen": jeder Klick setzt
         einen weiteren Streckenpunkt (mindestens 3 nötig); die letzte Verbindung zurück zum ersten Punkt
         schließt die Schleife automatisch. „Kreuzung platzieren": jeder Klick setzt ein neues Vier-Wege-Kreuz.
-        Wechsle danach zurück zu „Straße bauen" und klicke einfach auf einen Arm einer Kreuzung — Mitte und
-        gegenüberliegender Arm werden automatisch mit ergänzt, sodass daraus direkt eine durchgehende Straße
-        entsteht. Führe deinen Linienzug so einmal für die erste und später ein zweites Mal für die kreuzende
-        Straße durch dieselbe Kreuzung — daraus wird beim Fertigstellen automatisch eine echte Kreuzung.
+        Wechsle danach zurück zu „Straße bauen": Klickst du einen Arm einer Kreuzung an, endet deine Straße
+        dort nicht — sie fährt automatisch geradeaus durch die Mitte zum gegenüberliegenden Arm weiter, und
+        von dort baust du ganz normal weiter. Nutzt du so zwei verschiedene Achsen derselben Kreuzung
+        (z. B. einmal oben/unten, einmal links/rechts), wird daraus beim Fertigstellen automatisch eine
+        echte Vier-Wege-Kreuzung mit eigener Vorfahrtslogik.
       </p>
       <div class="element-buttons">
         <button id="build-tool-road-btn" class="place-btn active">🛣️ Straße bauen</button>
@@ -805,15 +806,35 @@
   }
 
   // ---- Track 3+: user-built tracks, a smooth closed curve through
-  // arbitrary points. Uses a Catmull-Rom spline, which passes exactly
-  // through every control point — so crossing nodes stay precisely where
-  // they were placed even though the road between them now curves.
-  function catmullRom(p0, p1, p2, p3, t) {
-    const t2 = t * t, t3 = t2 * t;
-    return {
-      x: 0.5 * (2 * p1.x + (-p0.x + p2.x) * t + (2 * p0.x - 5 * p1.x + 4 * p2.x - p3.x) * t2 + (-p0.x + 3 * p1.x - 3 * p2.x + p3.x) * t3),
-      y: 0.5 * (2 * p1.y + (-p0.y + p2.y) * t + (2 * p0.y - 5 * p1.y + 4 * p2.y - p3.y) * t2 + (-p0.y + 3 * p1.y - 3 * p2.y + p3.y) * t3)
-    };
+  // arbitrary points. Uses a *centripetal* Catmull-Rom spline — it still
+  // passes exactly through every control point, but unlike the plain
+  // ("uniform") variant it doesn't overshoot into little loops when
+  // consecutive points are unevenly spaced or change direction sharply
+  // (e.g. a road meeting a crossing at an angle instead of head-on), which
+  // is what caused stray doubled-back road segments near such junctions.
+  function centripetalCatmullRom(p0, p1, p2, p3, t) {
+    const alpha = 0.5;
+    function knotStep(a, b) {
+      const d = Math.hypot(b.x - a.x, b.y - a.y);
+      return Math.pow(Math.max(d, 1e-6), alpha);
+    }
+    function lerp(a, b, tA, tB, tC) {
+      if (tB - tA < 1e-9) return a;
+      const f = (tC - tA) / (tB - tA);
+      return { x: a.x + (b.x - a.x) * f, y: a.y + (b.y - a.y) * f };
+    }
+    const t0 = 0;
+    const t1 = t0 + knotStep(p0, p1);
+    const t2 = t1 + knotStep(p1, p2);
+    const t3 = t2 + knotStep(p2, p3);
+    const tt = t1 + t * (t2 - t1);
+
+    const A1 = lerp(p0, p1, t0, t1, tt);
+    const A2 = lerp(p1, p2, t1, t2, tt);
+    const A3 = lerp(p2, p3, t2, t3, tt);
+    const B1 = lerp(A1, A2, t0, t2, tt);
+    const B2 = lerp(A2, A3, t1, t3, tt);
+    return lerp(B1, B2, t1, t2, tt);
   }
 
   function buildPointTrack(points, crossings) {
@@ -828,7 +849,7 @@
     for (let i = 0; i < n; i++) {
       const p0 = pts[(i - 1 + n) % n], p1 = pts[i], p2 = pts[(i + 1) % n], p3 = pts[(i + 2) % n];
       for (let s = 0; s < SUBSAMPLES; s++) {
-        const pt = catmullRom(p0, p1, p2, p3, s / SUBSAMPLES);
+        const pt = centripetalCatmullRom(p0, p1, p2, p3, s / SUBSAMPLES);
         raw.push({ x: pt.x, y: pt.y, controlIdx: s === 0 ? i : null });
       }
     }
@@ -959,6 +980,7 @@
   // ---------- Custom track building ----------
   let buildModeActive = false;
   let buildPoints = []; // [{x, y}] in canvas coordinates, collected by clicking
+  let buildActionSizes = []; // how many buildPoints each click added, so undo removes a whole click's worth at once
 
   // A "crossing template" is a ready-made four-way intersection stamp:
   // a center plus four arm nodes 90° apart, rotatable as a whole. Its five
@@ -2077,17 +2099,14 @@
         return;
       }
 
-      // Snap to the nearest crossing node (center or one of its four arms)
-      // if the click landed close to one, so the path lines up exactly.
-      // Crucially, we tag *at click time* which crossing/node this point
-      // belongs to — rather than re-guessing it later from coordinates
-      // alone, which broke down if the path ever happened to pass near the
-      // same spot again while routing the rest of the loop.
+      // Snap to the nearest crossing ARM (not the center — that's now purely
+      // an internal waypoint, never a click target) if the click landed
+      // close to one, so the path lines up exactly.
       let snapped = { x: clickX, y: clickY, crossingIdx: -1, nodeIdx: -1 };
       let bestDist = CROSSING_SNAP;
       for (let ci = 0; ci < pendingCrossings.length; ci++) {
         const nodes = crossingNodes(pendingCrossings[ci]);
-        for (let ni = 0; ni < nodes.length; ni++) {
+        for (let ni = 1; ni <= 4; ni++) {
           const d = Math.hypot(nodes[ni].x - clickX, nodes[ni].y - clickY);
           if (d < bestDist) {
             bestDist = d;
@@ -2096,19 +2115,22 @@
         }
       }
 
-      // Connecting two different arms of the same crossing back to back is
-      // exactly "a road through this intersection" — no need to click the
-      // center in between, it's inserted automatically.
-      const last = buildPoints[buildPoints.length - 1];
-      const isArm = snapped.nodeIdx >= 1;
-      const lastIsDifferentArmOfSameCrossing =
-        last && last.crossingIdx === snapped.crossingIdx && last.nodeIdx >= 1 && last.nodeIdx !== snapped.nodeIdx;
-      if (isArm && lastIsDifferentArmOfSameCrossing) {
-        const center = crossingNodes(pendingCrossings[snapped.crossingIdx])[0];
-        buildPoints.push({ x: center.x, y: center.y, crossingIdx: snapped.crossingIdx, nodeIdx: 0 });
+      if (snapped.nodeIdx >= 1) {
+        // Roads don't get drawn "through" a crossing point by point anymore —
+        // clicking one arm ends this segment right there and automatically
+        // continues straight out the opposite arm (the crossing's default
+        // behavior), ready for the next click to start the next segment.
+        const nodes = crossingNodes(pendingCrossings[snapped.crossingIdx]);
+        const oppositeIdx = ((snapped.nodeIdx - 1 + 2) % 4) + 1;
+        buildPoints.push(snapped);
+        buildPoints.push({ x: nodes[0].x, y: nodes[0].y, crossingIdx: snapped.crossingIdx, nodeIdx: 0 });
+        buildPoints.push({ x: nodes[oppositeIdx].x, y: nodes[oppositeIdx].y, crossingIdx: snapped.crossingIdx, nodeIdx: oppositeIdx });
+        buildActionSizes.push(3);
+        return;
       }
 
       buildPoints.push(snapped);
+      buildActionSizes.push(1);
       return;
     }
 
@@ -2224,6 +2246,7 @@
   function enterBuildMode() {
     buildModeActive = true;
     buildPoints = [];
+    buildActionSizes = [];
     pendingCrossings = [];
     selectedCrossingIdx = -1;
     setBuildTool('road');
@@ -2234,6 +2257,7 @@
   function exitBuildMode() {
     buildModeActive = false;
     buildPoints = [];
+    buildActionSizes = [];
     pendingCrossings = [];
     selectedCrossingIdx = -1;
     canvas.classList.remove('build-mode');
@@ -2263,7 +2287,8 @@
   });
 
   document.getElementById('build-undo-btn').addEventListener('click', () => {
-    buildPoints.pop();
+    const n = buildActionSizes.pop();
+    if (n) buildPoints.splice(buildPoints.length - n, n);
   });
 
   document.getElementById('build-cancel-btn').addEventListener('click', () => {
