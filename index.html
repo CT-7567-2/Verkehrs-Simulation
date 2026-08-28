@@ -100,6 +100,20 @@
   }
   .track-btn:focus-visible { outline: 2px solid var(--marking); outline-offset: 2px; }
 
+  .track-btn.build-btn {
+    background: transparent;
+    border-style: dashed;
+  }
+  .track-btn.build-btn:hover { background: #1a1f26; }
+
+  .build-controls {
+    margin-top: 14px;
+    padding: 14px 16px;
+    background: var(--panel-bg);
+    border: 1px solid var(--marking);
+    border-radius: 12px;
+  }
+
   .stage {
     position: relative;
     width: 100%;
@@ -116,6 +130,7 @@
     height: auto;
     touch-action: none;
   }
+  canvas.build-mode { cursor: crosshair; }
 
   .panels {
     width: 100%;
@@ -471,9 +486,34 @@
       seine Fahrtrichtung. Platziere Ampeln und Vorfahrtsschilder frei auf der Strecke; Ampeln schaltest
       du manuell per Klick zwischen Rot und Grün.
     </p>
-    <div class="track-select">
-      <button id="track-oval-btn" class="track-btn active">Ringstraße</button>
-      <button id="track-figure8-btn" class="track-btn">Doppelschleife mit Kreuzung</button>
+    <div class="track-select" id="track-select">
+      <button id="track-oval-btn" class="track-btn active" data-track-id="oval">Ringstraße</button>
+      <button id="track-figure8-btn" class="track-btn" data-track-id="figure8">Doppelschleife mit Kreuzung</button>
+      <button id="build-track-btn" class="track-btn build-btn">✏️ Eigene Strecke bauen</button>
+      <button id="save-tracks-btn" class="track-btn build-btn">💾 Strecken speichern</button>
+      <button id="load-tracks-btn" class="track-btn build-btn">📂 Strecken laden</button>
+      <input type="file" id="load-tracks-input" accept="application/json" style="display:none;">
+    </div>
+    <div class="build-controls" id="build-controls" style="display:none;">
+      <p class="element-hint" style="margin:0 0 8px;">
+        Wähle ein Werkzeug — es bleibt aktiv, bis du ein anderes wählst. „Straße bauen": jeder Klick setzt
+        einen weiteren Streckenpunkt (mindestens 3 nötig); die letzte Verbindung zurück zum ersten Punkt
+        schließt die Schleife automatisch. „Kreuzung platzieren": jeder Klick setzt ein neues Vier-Wege-Kreuz.
+        Wechsle danach zurück zu „Straße bauen" und klicke einfach auf einen Arm einer Kreuzung — Mitte und
+        gegenüberliegender Arm werden automatisch mit ergänzt, sodass daraus direkt eine durchgehende Straße
+        entsteht. Führe deinen Linienzug so einmal für die erste und später ein zweites Mal für die kreuzende
+        Straße durch dieselbe Kreuzung — daraus wird beim Fertigstellen automatisch eine echte Kreuzung.
+      </p>
+      <div class="element-buttons">
+        <button id="build-tool-road-btn" class="place-btn active">🛣️ Straße bauen</button>
+        <button id="build-tool-crossing-btn" class="place-btn">🔀 Kreuzung platzieren</button>
+        <button id="build-select-crossing-btn" class="place-btn">🔁 Andere Kreuzung wählen</button>
+        <button id="build-rotate-ccw-btn" class="place-btn">↺ 15°</button>
+        <button id="build-rotate-cw-btn" class="place-btn">↻ 15°</button>
+        <button id="build-undo-btn" class="place-btn">↩️ Letzten Punkt entfernen</button>
+        <button id="build-finish-btn" class="place-btn">✅ Schließen &amp; verwenden</button>
+        <button id="build-cancel-btn" class="inspector-link">Abbrechen</button>
+      </div>
     </div>
   </header>
 
@@ -570,8 +610,8 @@
       auf den Kreuzungsarm ein. Klicke ein vorhandenes Element an, um es zu entfernen. Außerhalb des
       Platzierungsmodus schaltet ein Klick auf eine Ampel sie zwischen Rot und Grün um. An einer Kreuzung
       erzwingt eine Vorfahrtsstraße freie Fahrt für ihre Seite, während Vorfahrt-achten-Schilder auf der
-      Gegenseite immer warten müssen; ohne Schilder gilt automatisch „wer zuerst da ist". Ein Fahrzeug
-      lässt sich zusätzlich anfassen und verschieben — die Straßenseite beim Loslassen bestimmt die
+      Gegenseite immer warten müssen; ohne Schilder gilt automatisch „wer zuerst da ist". Ein Fahrzeug lässt
+      sich zusätzlich anfassen und verschieben — die Straßenseite beim Loslassen bestimmt die
       Fahrtrichtung.
     </p>
   </div>
@@ -764,10 +804,117 @@
     return { length, trackPoint: trackPointImpl, drawPath: drawPathImpl, crossings: [crossing] };
   }
 
+  // ---- Track 3+: user-built tracks, a smooth closed curve through
+  // arbitrary points. Uses a Catmull-Rom spline, which passes exactly
+  // through every control point — so crossing nodes stay precisely where
+  // they were placed even though the road between them now curves.
+  function catmullRom(p0, p1, p2, p3, t) {
+    const t2 = t * t, t3 = t2 * t;
+    return {
+      x: 0.5 * (2 * p1.x + (-p0.x + p2.x) * t + (2 * p0.x - 5 * p1.x + 4 * p2.x - p3.x) * t2 + (-p0.x + 3 * p1.x - 3 * p2.x + p3.x) * t3),
+      y: 0.5 * (2 * p1.y + (-p0.y + p2.y) * t + (2 * p0.y - 5 * p1.y + 4 * p2.y - p3.y) * t2 + (-p0.y + 3 * p1.y - 3 * p2.y + p3.y) * t3)
+    };
+  }
+
+  function buildPointTrack(points, crossings) {
+    const pts = points.map(p => ({ x: p.x, y: p.y }));
+    const n = pts.length;
+    const SUBSAMPLES = 20; // fine steps per control-point segment
+
+    // Finely sample the whole closed spline, remembering which raw sample
+    // sits exactly on a control point (t=0 of its segment) so crossing arc
+    // lengths can be looked up precisely afterwards.
+    const raw = [];
+    for (let i = 0; i < n; i++) {
+      const p0 = pts[(i - 1 + n) % n], p1 = pts[i], p2 = pts[(i + 1) % n], p3 = pts[(i + 2) % n];
+      for (let s = 0; s < SUBSAMPLES; s++) {
+        const pt = catmullRom(p0, p1, p2, p3, s / SUBSAMPLES);
+        raw.push({ x: pt.x, y: pt.y, controlIdx: s === 0 ? i : null });
+      }
+    }
+
+    const cum = [0];
+    for (let i = 1; i < raw.length; i++) {
+      cum.push(cum[i - 1] + Math.hypot(raw[i].x - raw[i - 1].x, raw[i].y - raw[i - 1].y));
+    }
+    const closingDist = Math.hypot(raw[0].x - raw[raw.length - 1].x, raw[0].y - raw[raw.length - 1].y);
+    const length = cum[cum.length - 1] + closingDist;
+
+    // control point index -> arc length, used to place crossings precisely
+    const controlArc = new Array(n);
+    for (let i = 0; i < raw.length; i++) {
+      if (raw[i].controlIdx !== null) controlArc[raw[i].controlIdx] = cum[i];
+    }
+
+    // Uniform-arc-length lookup table for O(1) trackPoint queries, same
+    // approach as the figure-8 track.
+    const rawExt = raw.concat([{ x: raw[0].x, y: raw[0].y }]);
+    const cumExt = cum.concat([length]);
+    const LUT_N = Math.max(400, n * 20);
+    const lut = new Array(LUT_N + 1);
+    let rawIdx = 1;
+    for (let k = 0; k <= LUT_N; k++) {
+      const targetS = (k / LUT_N) * length;
+      while (rawIdx < cumExt.length - 1 && cumExt[rawIdx] < targetS) rawIdx++;
+      const s0 = cumExt[rawIdx - 1], s1 = cumExt[rawIdx];
+      const frac = s1 > s0 ? (targetS - s0) / (s1 - s0) : 0;
+      const a = rawExt[rawIdx - 1], b = rawExt[rawIdx];
+      lut[k] = { x: a.x + (b.x - a.x) * frac, y: a.y + (b.y - a.y) * frac };
+    }
+    for (let k = 0; k <= LUT_N; k++) {
+      const prev = lut[(k - 1 + lut.length) % lut.length];
+      const next = lut[(k + 1) % lut.length];
+      lut[k].heading = Math.atan2(next.y - prev.y, next.x - prev.x);
+    }
+
+    function trackPointImpl(s) {
+      s = ((s % length) + length) % length;
+      const idx = (s / length) * LUT_N;
+      const i0 = Math.floor(idx) % (LUT_N + 1);
+      const i1 = (i0 + 1) % (LUT_N + 1);
+      const frac = idx - Math.floor(idx);
+      const a = lut[i0], b = lut[i1];
+      return { x: a.x + (b.x - a.x) * frac, y: a.y + (b.y - a.y) * frac, heading: a.heading };
+    }
+
+    function drawPathImpl() {
+      ctx.beginPath();
+      ctx.moveTo(lut[0].x, lut[0].y);
+      for (let k = 1; k <= LUT_N; k++) ctx.lineTo(lut[k].x, lut[k].y);
+      ctx.closePath();
+    }
+
+    // `crossings` is kept by reference (owned by the TRACKS registry entry)
+    // so manually placed intersections survive being rebuilt every time the
+    // track is switched to.
+    return { length, trackPoint: trackPointImpl, drawPath: drawPathImpl, crossings: crossings || [], controlArc };
+  }
+
+  // Samples a track's actual driving line into plain points, used for JSON
+  // export. Works identically for the built-in math tracks and any
+  // point-based custom track, since both expose the same trackPoint(s) API.
+  function sampleTrackForExport(trackDef, count) {
+    const pts = [];
+    for (let i = 0; i < count; i++) {
+      const p = trackDef.trackPoint((i / count) * trackDef.length);
+      pts.push({ x: Math.round(p.x * 10) / 10, y: Math.round(p.y * 10) / 10 });
+    }
+    return pts;
+  }
+
   const TRACKS = {
-    oval: { label: 'Ringstraße', build: buildOvalTrack },
-    figure8: { label: 'Doppelschleife mit Kreuzung', build: buildFigure8Track }
+    oval: {
+      label: 'Ringstraße',
+      build: buildOvalTrack,
+      exportPoints: () => sampleTrackForExport(buildOvalTrack(), 240)
+    },
+    figure8: {
+      label: 'Doppelschleife mit Kreuzung',
+      build: buildFigure8Track,
+      exportPoints: () => sampleTrackForExport(buildFigure8Track(), 240)
+    }
   };
+  let customTrackCounter = 1;
 
   let currentTrackId = 'oval';
   let currentTrackDef = null;
@@ -808,6 +955,30 @@
   let trafficLights = [];   // { s: arc-length position, side, state: 'red' | 'green' }
   let yieldSigns = [];      // { s: arc-length position, side, type: 'priority' | 'yield' }
   let placementMode = null; // null | 'light' | 'priority' | 'yield'
+
+  // ---------- Custom track building ----------
+  let buildModeActive = false;
+  let buildPoints = []; // [{x, y}] in canvas coordinates, collected by clicking
+
+  // A "crossing template" is a ready-made four-way intersection stamp:
+  // a center plus four arm nodes 90° apart, rotatable as a whole. Its five
+  // points act as snap targets while building — walk the path through the
+  // center twice (once per road) and the two passes become a real crossing
+  // automatically once the track is finished.
+  let pendingCrossings = []; // [{x, y, radius, rotation}]
+  let selectedCrossingIdx = -1;
+  let buildTool = 'road'; // 'road' | 'crossing' — stays selected until switched, no re-picking per click
+  const CROSSING_RADIUS = 45;
+  const CROSSING_SNAP = 14;
+
+  function crossingNodes(c) {
+    const nodes = [{ x: c.x, y: c.y }]; // index 0 = center
+    for (let k = 0; k < 4; k++) {
+      const a = c.rotation + k * (Math.PI / 2);
+      nodes.push({ x: c.x + Math.cos(a) * c.radius, y: c.y + Math.sin(a) * c.radius });
+    }
+    return nodes;
+  }
 
   // Precomputed samples along the track, used to snap a click to the
   // nearest point on the road (so placed elements sit exactly on the path).
@@ -869,6 +1040,13 @@
   // placed lights/signs (their arc-length positions belong to the old track
   // and would no longer make sense), and restarts the simulation on it.
   function switchTrack(trackId) {
+    if (buildModeActive) {
+      buildModeActive = false;
+      buildPoints = [];
+      canvas.classList.remove('build-mode');
+      const bc = document.getElementById('build-controls');
+      if (bc) bc.style.display = 'none';
+    }
     currentTrackId = trackId;
     currentTrackDef = TRACKS[trackId].build();
     TRACK_LENGTH = currentTrackDef.length;
@@ -879,6 +1057,12 @@
     for (const id of ['place-light-btn', 'place-priority-btn', 'place-yield-btn']) {
       const btn = document.getElementById(id);
       if (btn) btn.classList.remove('active');
+    }
+    const selectEl = document.getElementById('track-select');
+    if (selectEl) {
+      selectEl.querySelectorAll('.track-btn[data-track-id]').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.trackId === trackId);
+      });
     }
     initSim(N, BASE_V0_KMH);
   }
@@ -1362,6 +1546,93 @@
     return `rgb(${r | 0}, ${g | 0}, ${b | 0})`;
   }
 
+  // Renders the in-progress custom track: placed points, straight segments
+  // between them, and a faint preview line back to the start once there are
+  // enough points to close a loop.
+  function drawBuildMode() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    ctx.fillStyle = '#7c8794';
+    ctx.font = '13px JetBrains Mono, monospace';
+    ctx.fillText(
+      buildTool === 'crossing'
+        ? 'Werkzeug: Kreuzung platzieren — jeder Klick setzt ein neues Kreuz…'
+        : 'Werkzeug: Straße bauen — jeder Klick setzt einen Streckenpunkt…',
+      20, 26
+    );
+
+    // crossing templates — drawn first so path lines/points sit on top
+    for (let ci = 0; ci < pendingCrossings.length; ci++) {
+      const c = pendingCrossings[ci];
+      const nodes = crossingNodes(c);
+      const isSelected = ci === selectedCrossingIdx;
+
+      ctx.strokeStyle = isSelected ? '#e3b341' : '#5a6472';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(nodes[1].x, nodes[1].y);
+      ctx.lineTo(nodes[3].x, nodes[3].y);
+      ctx.moveTo(nodes[2].x, nodes[2].y);
+      ctx.lineTo(nodes[4].x, nodes[4].y);
+      ctx.stroke();
+
+      // center
+      ctx.beginPath();
+      ctx.arc(nodes[0].x, nodes[0].y, 8, 0, Math.PI * 2);
+      ctx.fillStyle = isSelected ? '#e3b341' : '#8b96a3';
+      ctx.fill();
+      ctx.strokeStyle = '#0b0f14';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+
+      // arm nodes
+      for (let k = 1; k <= 4; k++) {
+        ctx.beginPath();
+        ctx.arc(nodes[k].x, nodes[k].y, 5, 0, Math.PI * 2);
+        ctx.fillStyle = '#2dd4bf';
+        ctx.fill();
+        ctx.strokeStyle = '#0b0f14';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+      }
+    }
+
+    if (buildPoints.length > 0) {
+      ctx.strokeStyle = '#e3b341';
+      ctx.lineWidth = 3;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.beginPath();
+      ctx.moveTo(buildPoints[0].x, buildPoints[0].y);
+      for (let i = 1; i < buildPoints.length; i++) ctx.lineTo(buildPoints[i].x, buildPoints[i].y);
+      ctx.stroke();
+
+      if (buildPoints.length >= 3) {
+        ctx.setLineDash([6, 6]);
+        ctx.strokeStyle = '#e3b34188';
+        ctx.beginPath();
+        ctx.moveTo(buildPoints[buildPoints.length - 1].x, buildPoints[buildPoints.length - 1].y);
+        ctx.lineTo(buildPoints[0].x, buildPoints[0].y);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+
+      for (let i = 0; i < buildPoints.length; i++) {
+        const p = buildPoints[i];
+        const isSnapped = p.crossingIdx !== undefined && p.crossingIdx >= 0;
+        let color = i === 0 ? '#22c55e' : '#e3b341';
+        if (isSnapped) color = p.nodeIdx === 0 ? '#0d9488' : '#2dd4bf';
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, i === 0 ? 7 : (isSnapped ? 6 : 5), 0, Math.PI * 2);
+        ctx.fillStyle = color;
+        ctx.fill();
+        ctx.strokeStyle = '#0b0f14';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+      }
+    }
+  }
+
   function draw() {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
@@ -1558,6 +1829,12 @@
     dt = Math.min(dt, 0.05); // avoid large jumps on tab refocus
     lastT = t;
 
+    if (buildModeActive) {
+      drawBuildMode();
+      requestAnimationFrame(loop);
+      return;
+    }
+
     if (timeScale >= 1) {
       const subSteps = Math.round(timeScale);
       for (let i = 0; i < subSteps; i++) step(dt);
@@ -1714,7 +1991,7 @@
   const DRAG_THRESHOLD = 5;
 
   canvas.addEventListener('pointerdown', (e) => {
-    if (placementMode) return;
+    if (placementMode || buildModeActive) return;
     const { x, y } = canvasCoords(e);
     const idx = vehicleHitTest(x, y, 26);
     if (idx !== -1) {
@@ -1791,6 +2068,50 @@
 
     const { x: clickX, y: clickY } = canvasCoords(e);
 
+    if (buildModeActive) {
+      if (buildTool === 'crossing') {
+        // Stays selected across clicks — every click adds another crossing
+        // without having to re-pick the tool first.
+        pendingCrossings.push({ x: clickX, y: clickY, radius: CROSSING_RADIUS, rotation: 0 });
+        selectedCrossingIdx = pendingCrossings.length - 1;
+        return;
+      }
+
+      // Snap to the nearest crossing node (center or one of its four arms)
+      // if the click landed close to one, so the path lines up exactly.
+      // Crucially, we tag *at click time* which crossing/node this point
+      // belongs to — rather than re-guessing it later from coordinates
+      // alone, which broke down if the path ever happened to pass near the
+      // same spot again while routing the rest of the loop.
+      let snapped = { x: clickX, y: clickY, crossingIdx: -1, nodeIdx: -1 };
+      let bestDist = CROSSING_SNAP;
+      for (let ci = 0; ci < pendingCrossings.length; ci++) {
+        const nodes = crossingNodes(pendingCrossings[ci]);
+        for (let ni = 0; ni < nodes.length; ni++) {
+          const d = Math.hypot(nodes[ni].x - clickX, nodes[ni].y - clickY);
+          if (d < bestDist) {
+            bestDist = d;
+            snapped = { x: nodes[ni].x, y: nodes[ni].y, crossingIdx: ci, nodeIdx: ni };
+          }
+        }
+      }
+
+      // Connecting two different arms of the same crossing back to back is
+      // exactly "a road through this intersection" — no need to click the
+      // center in between, it's inserted automatically.
+      const last = buildPoints[buildPoints.length - 1];
+      const isArm = snapped.nodeIdx >= 1;
+      const lastIsDifferentArmOfSameCrossing =
+        last && last.crossingIdx === snapped.crossingIdx && last.nodeIdx >= 1 && last.nodeIdx !== snapped.nodeIdx;
+      if (isArm && lastIsDifferentArmOfSameCrossing) {
+        const center = crossingNodes(pendingCrossings[snapped.crossingIdx])[0];
+        buildPoints.push({ x: center.x, y: center.y, crossingIdx: snapped.crossingIdx, nodeIdx: 0 });
+      }
+
+      buildPoints.push(snapped);
+      return;
+    }
+
     if (placementMode === 'light') {
       const hitIdx = hitTestList(trafficLights, clickX, clickY, 16);
       if (hitIdx !== -1) {
@@ -1853,22 +2174,200 @@
   document.getElementById('clear-elements-btn').addEventListener('click', () => {
     trafficLights = [];
     yieldSigns = [];
+    // Only clear manually placed crossings on custom tracks — the figure-8's
+    // automatic intersection isn't something the person placed, so it
+    // shouldn't disappear here (it comes back on its own via a track switch anyway).
+    const entry = TRACKS[currentTrackId];
+    if (entry && entry.crossings) entry.crossings.length = 0;
   });
 
   // ---------- Track selection ----------
-  const trackOvalBtn = document.getElementById('track-oval-btn');
-  const trackFigure8Btn = document.getElementById('track-figure8-btn');
-  trackOvalBtn.addEventListener('click', () => {
-    if (currentTrackId === 'oval') return;
-    trackOvalBtn.classList.add('active');
-    trackFigure8Btn.classList.remove('active');
-    switchTrack('oval');
+  const trackSelectEl = document.getElementById('track-select');
+
+  function setActiveTrackButton(trackId) {
+    trackSelectEl.querySelectorAll('.track-btn[data-track-id]').forEach(btn => {
+      btn.classList.toggle('active', btn.dataset.trackId === trackId);
+    });
+  }
+
+  function wireTrackButton(btn) {
+    btn.addEventListener('click', () => {
+      const id = btn.dataset.trackId;
+      if (currentTrackId === id) return;
+      switchTrack(id);
+    });
+  }
+
+  function addTrackButton(id, label) {
+    const btn = document.createElement('button');
+    btn.className = 'track-btn';
+    btn.dataset.trackId = id;
+    btn.textContent = label;
+    wireTrackButton(btn);
+    // insert before the dashed action buttons (build/save/load) so track
+    // options stay grouped together on the left
+    trackSelectEl.insertBefore(btn, document.getElementById('build-track-btn'));
+    return btn;
+  }
+
+  trackSelectEl.querySelectorAll('.track-btn[data-track-id]').forEach(wireTrackButton);
+
+  // ---------- Custom track building ----------
+  const buildControlsEl = document.getElementById('build-controls');
+
+  function setBuildTool(tool) {
+    buildTool = tool;
+    document.getElementById('build-tool-road-btn').classList.toggle('active', tool === 'road');
+    document.getElementById('build-tool-crossing-btn').classList.toggle('active', tool === 'crossing');
+  }
+
+  function enterBuildMode() {
+    buildModeActive = true;
+    buildPoints = [];
+    pendingCrossings = [];
+    selectedCrossingIdx = -1;
+    setBuildTool('road');
+    canvas.classList.add('build-mode');
+    buildControlsEl.style.display = 'block';
+  }
+
+  function exitBuildMode() {
+    buildModeActive = false;
+    buildPoints = [];
+    pendingCrossings = [];
+    selectedCrossingIdx = -1;
+    canvas.classList.remove('build-mode');
+    buildControlsEl.style.display = 'none';
+  }
+
+  document.getElementById('build-track-btn').addEventListener('click', () => {
+    if (buildModeActive) { exitBuildMode(); return; }
+    enterBuildMode();
   });
-  trackFigure8Btn.addEventListener('click', () => {
-    if (currentTrackId === 'figure8') return;
-    trackFigure8Btn.classList.add('active');
-    trackOvalBtn.classList.remove('active');
-    switchTrack('figure8');
+
+  document.getElementById('build-tool-road-btn').addEventListener('click', () => setBuildTool('road'));
+  document.getElementById('build-tool-crossing-btn').addEventListener('click', () => setBuildTool('crossing'));
+
+  document.getElementById('build-select-crossing-btn').addEventListener('click', () => {
+    if (pendingCrossings.length === 0) return;
+    selectedCrossingIdx = (selectedCrossingIdx + 1) % pendingCrossings.length;
+  });
+
+  document.getElementById('build-rotate-ccw-btn').addEventListener('click', () => {
+    if (selectedCrossingIdx < 0) return;
+    pendingCrossings[selectedCrossingIdx].rotation -= Math.PI / 12; // 15°
+  });
+  document.getElementById('build-rotate-cw-btn').addEventListener('click', () => {
+    if (selectedCrossingIdx < 0) return;
+    pendingCrossings[selectedCrossingIdx].rotation += Math.PI / 12;
+  });
+
+  document.getElementById('build-undo-btn').addEventListener('click', () => {
+    buildPoints.pop();
+  });
+
+  document.getElementById('build-cancel-btn').addEventListener('click', () => {
+    exitBuildMode();
+  });
+
+  document.getElementById('build-finish-btn').addEventListener('click', () => {
+    if (buildPoints.length < 3) return; // not enough to form a loop yet
+    const id = 'custom-' + Date.now();
+    const label = 'Eigene Strecke ' + customTrackCounter++;
+    const pointsCopy = buildPoints.map(p => ({ x: p.x, y: p.y }));
+
+    // A crossing template becomes a real, functional crossing if the path
+    // was routed through its exact center at least twice — once per road.
+    // Which points belong to which crossing's center was tagged the moment
+    // they were placed (see the click handler above), so this just reads
+    // that back rather than re-guessing it from coordinates afterwards —
+    // that used to misfire if the path ever passed near the same spot again
+    // later while routing the rest of the loop.
+    //
+    // Arc lengths come from the actual curved spline (controlArc), not a
+    // straight-line approximation, so a crossing's branches line up with
+    // where the smoothed road really passes through it.
+    const controlArc = buildPointTrack(pointsCopy, []).controlArc;
+    const crossings = [];
+    for (let ci = 0; ci < pendingCrossings.length; ci++) {
+      const centerHits = [];
+      for (let i = 0; i < buildPoints.length; i++) {
+        if (buildPoints[i].crossingIdx === ci && buildPoints[i].nodeIdx === 0) centerHits.push(controlArc[i]);
+      }
+      if (centerHits.length >= 2) {
+        crossings.push({ branches: [centerHits[0], centerHits[1]], occupant: null, yieldStops: [] });
+      }
+    }
+
+    TRACKS[id] = {
+      label,
+      crossings,
+      build: () => buildPointTrack(pointsCopy, crossings),
+      exportPoints: () => pointsCopy
+    };
+    addTrackButton(id, label);
+    exitBuildMode();
+    switchTrack(id);
+  });
+
+  // ---------- Save / load tracks as JSON ----------
+  document.getElementById('save-tracks-btn').addEventListener('click', () => {
+    const data = {
+      version: 1,
+      tracks: Object.keys(TRACKS).map(id => ({
+        id,
+        label: TRACKS[id].label,
+        points: TRACKS[id].exportPoints ? TRACKS[id].exportPoints() : [],
+        crossings: (TRACKS[id].crossings || []).map(c => c.branches)
+      }))
+    };
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'strecken.json';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  });
+
+  const loadTracksInput = document.getElementById('load-tracks-input');
+  document.getElementById('load-tracks-btn').addEventListener('click', () => {
+    loadTracksInput.click();
+  });
+  loadTracksInput.addEventListener('change', () => {
+    const file = loadTracksInput.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const data = JSON.parse(reader.result);
+        let imported = 0;
+        for (const t of (data.tracks || [])) {
+          if (!t.points || t.points.length < 3) continue;
+          // Skip re-importing the two built-in tracks by id — everything
+          // else becomes a new custom, point-based track in the registry.
+          if (t.id === 'oval' || t.id === 'figure8') continue;
+          const id = 'custom-' + Date.now() + '-' + imported;
+          const pointsCopy = t.points.map(p => ({ x: p.x, y: p.y }));
+          const label = t.label || ('Geladene Strecke ' + customTrackCounter++);
+          const crossings = (t.crossings || []).map(branches => ({ branches, occupant: null, yieldStops: [] }));
+          TRACKS[id] = {
+            label,
+            crossings,
+            build: () => buildPointTrack(pointsCopy, crossings),
+            exportPoints: () => pointsCopy
+          };
+          addTrackButton(id, label);
+          imported++;
+        }
+      } catch (err) {
+        console.error('Konnte Streckendatei nicht lesen:', err);
+      }
+      loadTracksInput.value = '';
+    };
+    reader.readAsText(file);
   });
 
   document.getElementById('brake-btn').addEventListener('pointerdown', (e) => {
