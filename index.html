@@ -131,6 +131,40 @@
     touch-action: none;
   }
   canvas.build-mode { cursor: crosshair; }
+  canvas.pan-mode { cursor: grab; }
+  canvas.pan-mode.panning { cursor: grabbing; }
+
+  .view-controls {
+    position: absolute;
+    right: 16px;
+    bottom: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    z-index: 5;
+  }
+
+  .view-btn {
+    width: 34px;
+    height: 34px;
+    border-radius: 8px;
+    border: 1px solid var(--panel-border);
+    background: var(--panel-bg);
+    color: var(--text);
+    font-size: 16px;
+    font-weight: 700;
+    line-height: 1;
+    cursor: pointer;
+    backdrop-filter: blur(6px);
+    transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+  }
+  .view-btn:hover { background: #1a1f26; }
+  .view-btn.active {
+    background: var(--marking);
+    color: #0b0f14;
+    border-color: var(--marking);
+  }
+  .view-btn:focus-visible { outline: 2px solid var(--marking); outline-offset: 2px; }
 
   .panels {
     width: 100%;
@@ -520,6 +554,12 @@
 
   <div class="stage">
     <canvas id="track" width="1200" height="640"></canvas>
+    <div class="view-controls">
+      <button id="pan-mode-btn" class="view-btn" title="Verschieben">🖐️</button>
+      <button id="zoom-in-btn" class="view-btn" title="Vergrößern">+</button>
+      <button id="zoom-out-btn" class="view-btn" title="Verkleinern">−</button>
+      <button id="view-reset-btn" class="view-btn" title="Ansicht zurücksetzen">⤢</button>
+    </div>
   </div>
 
   <div class="panels">
@@ -644,6 +684,21 @@
 (function () {
   const canvas = document.getElementById('track');
   const ctx = canvas.getContext('2d');
+
+  // ---------- Camera: zoom & pan ----------
+  // World (track) coordinates are unbounded — the camera just chooses which
+  // (world) point sits at the canvas center and how zoomed in it is. Every
+  // existing drawing call and every click/drag handler already goes through
+  // one shared coordinate conversion, so this is the only place that needs
+  // to know about zoom/pan at all.
+  const camera = { zoom: 1, cx: canvas.width / 2, cy: canvas.height / 2 };
+  const ZOOM_MIN = 0.2, ZOOM_MAX = 5, ZOOM_STEP = 1.25;
+
+  function applyCameraTransform() {
+    ctx.translate(canvas.width / 2, canvas.height / 2);
+    ctx.scale(camera.zoom, camera.zoom);
+    ctx.translate(-camera.cx, -camera.cy);
+  }
 
   // ---------- Track geometry (in simulation units, 1 unit ≈ 1 meter) ----------
   // Two selectable tracks share the same vehicle physics: both are built as
@@ -1061,6 +1116,29 @@
   // Switches to a different track layout: rebuilds the geometry, clears any
   // placed lights/signs (their arc-length positions belong to the old track
   // and would no longer make sense), and restarts the simulation on it.
+  // Centers and scales the camera so the whole current track fits nicely in
+  // view — called whenever the track changes, since a custom or loaded
+  // track can be any size or shape.
+  function fitCameraToTrack() {
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    const SAMPLES = 120;
+    for (let i = 0; i < SAMPLES; i++) {
+      const p = currentTrackDef.trackPoint((i / SAMPLES) * currentTrackDef.length);
+      if (p.x < minX) minX = p.x;
+      if (p.x > maxX) maxX = p.x;
+      if (p.y < minY) minY = p.y;
+      if (p.y > maxY) maxY = p.y;
+    }
+    const w = Math.max(1, maxX - minX);
+    const h = Math.max(1, maxY - minY);
+    const margin = 1.3; // breathing room around the track edges
+    let zoom = Math.min(canvas.width / (w * margin), canvas.height / (h * margin));
+    zoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, zoom));
+    camera.cx = (minX + maxX) / 2;
+    camera.cy = (minY + maxY) / 2;
+    camera.zoom = zoom;
+  }
+
   function switchTrack(trackId) {
     if (buildModeActive) {
       buildModeActive = false;
@@ -1072,6 +1150,7 @@
     currentTrackId = trackId;
     currentTrackDef = TRACKS[trackId].build();
     TRACK_LENGTH = currentTrackDef.length;
+    fitCameraToTrack();
     rebuildTrackSamples();
     trafficLights = [];
     yieldSigns = [];
@@ -1583,6 +1662,9 @@
       20, 26
     );
 
+    ctx.save();
+    applyCameraTransform();
+
     // crossing templates — drawn first so path lines/points sit on top
     for (let ci = 0; ci < pendingCrossings.length; ci++) {
       const c = pendingCrossings[ci];
@@ -1653,10 +1735,14 @@
         ctx.stroke();
       }
     }
+
+    ctx.restore();
   }
 
   function draw() {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.save();
+    applyCameraTransform();
 
     // road bed
     ctx.lineCap = 'round';
@@ -1785,6 +1871,8 @@
       ctx.fill();
       ctx.restore();
     }
+
+    ctx.restore();
   }
 
   function updateLegend() {
@@ -1960,10 +2048,7 @@
                         e.clientY >= rect.top && e.clientY <= rect.bottom;
     if (!overCanvas) return; // dropped somewhere else — cancel, still parked
 
-    const scaleX = canvas.width / rect.width;
-    const scaleY = canvas.height / rect.height;
-    const x = (e.clientX - rect.left) * scaleX;
-    const y = (e.clientY - rect.top) * scaleY;
+    const { x, y } = canvasCoords(e);
 
     const hit = nearestTrackPos(x, y);
     if (!hit) return;
@@ -1987,7 +2072,12 @@
     const rect = canvas.getBoundingClientRect();
     const scaleX = canvas.width / rect.width;
     const scaleY = canvas.height / rect.height;
-    return { x: (e.clientX - rect.left) * scaleX, y: (e.clientY - rect.top) * scaleY };
+    const screenX = (e.clientX - rect.left) * scaleX;
+    const screenY = (e.clientY - rect.top) * scaleY;
+    return {
+      x: (screenX - canvas.width / 2) / camera.zoom + camera.cx,
+      y: (screenY - canvas.height / 2) / camera.zoom + camera.cy
+    };
   }
 
   function vehicleHitTest(x, y, radius) {
@@ -2012,7 +2102,39 @@
   let dragMoved = false;
   const DRAG_THRESHOLD = 5;
 
+  // ---------- Pan mode ----------
+  let panModeActive = false;
+  let isPanning = false;
+  let panStartClientX = 0, panStartClientY = 0, panStartCx = 0, panStartCy = 0;
+
+  const panModeBtn = document.getElementById('pan-mode-btn');
+  panModeBtn.addEventListener('click', () => {
+    panModeActive = !panModeActive;
+    panModeBtn.classList.toggle('active', panModeActive);
+    canvas.classList.toggle('pan-mode', panModeActive);
+  });
+
+  document.getElementById('zoom-in-btn').addEventListener('click', () => {
+    camera.zoom = Math.min(ZOOM_MAX, camera.zoom * ZOOM_STEP);
+  });
+  document.getElementById('zoom-out-btn').addEventListener('click', () => {
+    camera.zoom = Math.max(ZOOM_MIN, camera.zoom / ZOOM_STEP);
+  });
+  document.getElementById('view-reset-btn').addEventListener('click', () => {
+    fitCameraToTrack();
+  });
+
   canvas.addEventListener('pointerdown', (e) => {
+    if (panModeActive) {
+      isPanning = true;
+      panStartClientX = e.clientX;
+      panStartClientY = e.clientY;
+      panStartCx = camera.cx;
+      panStartCy = camera.cy;
+      canvas.classList.add('panning');
+      canvas.setPointerCapture(e.pointerId);
+      return;
+    }
     if (placementMode || buildModeActive) return;
     const { x, y } = canvasCoords(e);
     const idx = vehicleHitTest(x, y, 26);
@@ -2027,6 +2149,14 @@
   let dragOverParkingLot = false;
 
   canvas.addEventListener('pointermove', (e) => {
+    if (isPanning) {
+      const rect = canvas.getBoundingClientRect();
+      const scaleX = canvas.width / rect.width;
+      const scaleY = canvas.height / rect.height;
+      camera.cx = panStartCx - (e.clientX - panStartClientX) * scaleX / camera.zoom;
+      camera.cy = panStartCy - (e.clientY - panStartClientY) * scaleY / camera.zoom;
+      return;
+    }
     if (pointerDownIdx === null) return;
     const { x, y } = canvasCoords(e);
 
@@ -2069,6 +2199,11 @@
   });
 
   function endPointerInteraction() {
+    if (isPanning) {
+      isPanning = false;
+      canvas.classList.remove('panning');
+      return;
+    }
     if (draggingIndex !== null && dragOverParkingLot) {
       if (removeVehicleAtIndex(draggingIndex)) {
         setParkedCount(parkedCount + 1);
@@ -2084,6 +2219,10 @@
   window.addEventListener('pointercancel', endPointerInteraction);
 
   canvas.addEventListener('click', (e) => {
+    // Pan mode exclusively moves the camera — no placement, selection or
+    // toggling should also happen from the same click.
+    if (panModeActive) return;
+
     // A drag just finished — swallow the synthetic click browsers fire
     // afterward so it doesn't also toggle a light or re-select a vehicle.
     if (dragMoved) { dragMoved = false; return; }
