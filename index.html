@@ -852,6 +852,7 @@
 
     const crossing = {
       x: offsetX, y: offsetY,
+      radius: ROAD_WIDTH, // no explicit arm geometry here, so use the road width as the clearance reference
       branches: [sAtT(Math.PI / 2), sAtT(Math.PI * 3 / 2)],
       occupant: null,   // { idx, branchS } — which vehicle currently "owns" the intersection
       yieldStops: []    // recomputed every step: who has to wait this frame
@@ -1095,16 +1096,22 @@
     // as "before" depends on the lane clicked (forward traffic arrives from
     // lower s, oncoming traffic from higher s), not on which arm-half the
     // click happened to land nearest to.
-    const SNAP_RANGE = 40;
-    const STOPLINE_OFFSET = 26;
+    //
+    // Both the snap catch-radius and how far before the branch a sign/light
+    // ends up are scaled to *this crossing's own* physical size (its arm
+    // radius) — a fixed distance used to look fine for the default crossing,
+    // but left signs sitting visibly inside a bigger or rotated crossing.
     for (const crossing of currentTrackDef.crossings) {
+      const radius = crossing.radius || CROSSING_RADIUS;
+      const snapRange = radius + 10;
+      const stoplineOffset = radius + 12; // clear past the crossing's visual footprint
       for (const branchS of crossing.branches) {
         let delta = s - branchS;
         if (delta > TRACK_LENGTH / 2) delta -= TRACK_LENGTH;
         if (delta < -TRACK_LENGTH / 2) delta += TRACK_LENGTH;
-        if (Math.abs(delta) < SNAP_RANGE) {
+        if (Math.abs(delta) < snapRange) {
           const approachSign = side === 1 ? -1 : 1;
-          s = ((branchS + approachSign * STOPLINE_OFFSET) % TRACK_LENGTH + TRACK_LENGTH) % TRACK_LENGTH;
+          s = ((branchS + approachSign * stoplineOffset) % TRACK_LENGTH + TRACK_LENGTH) % TRACK_LENGTH;
           break;
         }
       }
@@ -1172,18 +1179,19 @@
     v.v0 = Math.max(3, BASE_V0_KMH * v.v0Factor + v.v0DeltaKmh) / 3.6;
   }
 
-  // Keeps a spawn position at least two car-lengths away from any crossing's
-  // stop line, so vehicles never start out already sitting on or right next
-  // to an intersection.
+  // Keeps a spawn position safely clear of any crossing's actual stop line
+  // (radius-based, same as the live physics), so vehicles never start out
+  // already sitting on, or too close to react to, an intersection.
   function avoidCrossingSpawn(pos) {
-    const EXCLUSION = CAR_LENGTH * 2;
     for (const crossing of currentTrackDef.crossings) {
+      const radius = crossing.radius || CROSSING_RADIUS;
+      const exclusion = radius + CAR_LENGTH * 2;
       for (const branchS of crossing.branches) {
         let d = pos - branchS;
         if (d > TRACK_LENGTH / 2) d -= TRACK_LENGTH;
         if (d < -TRACK_LENGTH / 2) d += TRACK_LENGTH;
-        if (Math.abs(d) < EXCLUSION) {
-          pos = ((branchS + EXCLUSION) % TRACK_LENGTH + TRACK_LENGTH) % TRACK_LENGTH;
+        if (Math.abs(d) < exclusion) {
+          pos = ((branchS + exclusion) % TRACK_LENGTH + TRACK_LENGTH) % TRACK_LENGTH;
         }
       }
     }
@@ -1436,10 +1444,7 @@
     // stop placed right at their own branch — built the exact same way a
     // red light is, so all the existing braking, queueing and post-stop
     // acceleration boost logic applies for free.
-    const INTERSECTION_APPROACH = 130;
-    const INTERSECTION_CLEARANCE = CAR_LENGTH + ROAD_WIDTH; // must fully clear the physical intersection box, not just its center
     const SIGN_MATCH_RANGE = 90; // a sign this close before a branch, on the matching side, governs that flow
-    const STOPLINE_SETBACK = ROAD_WIDTH; // stop well clear of the intersection box, never partway into it
 
     function flowRank(branchS, direction) {
       let rank = 1; // default: unmarked, negotiates via first-come-first-served
@@ -1456,6 +1461,15 @@
     }
 
     for (const crossing of currentTrackDef.crossings) {
+      // Every distance here scales with *this crossing's own* radius rather
+      // than a fixed constant — a bigger (or smaller) crossing template
+      // needs its stop line, clearance and approach runway sized to match,
+      // or vehicles either stop visibly inside it or spawn too close to it.
+      const radius = crossing.radius || CROSSING_RADIUS;
+      const stoplineSetback = radius + CAR_LENGTH; // stop clearly outside the intersection box
+      const intersectionClearance = CAR_LENGTH + radius; // must fully clear the box, not just its center
+      const intersectionApproach = stoplineSetback + 84; // extra runway to react before the stop line
+
       if (crossing.occupant) {
         const v = vehicles[crossing.occupant.idx];
         if (!v) {
@@ -1464,7 +1478,7 @@
           const branchS = crossing.occupant.branchS;
           let past = v.direction === 1 ? (v.pos - branchS) : (branchS - v.pos);
           past = ((past % TRACK_LENGTH) + TRACK_LENGTH) % TRACK_LENGTH;
-          if (past > INTERSECTION_CLEARANCE && past < TRACK_LENGTH / 2) crossing.occupant = null;
+          if (past > intersectionClearance && past < TRACK_LENGTH / 2) crossing.occupant = null;
         }
       }
 
@@ -1474,7 +1488,7 @@
         for (const branchS of crossing.branches) {
           let d = v.direction === 1 ? (branchS - v.pos) : (v.pos - branchS);
           d = ((d % TRACK_LENGTH) + TRACK_LENGTH) % TRACK_LENGTH;
-          if (d < INTERSECTION_APPROACH) {
+          if (d < intersectionApproach) {
             approachers.push({ idx: i, branchS, dist: d, direction: v.direction, rank: flowRank(branchS, v.direction) });
           }
         }
@@ -1495,7 +1509,7 @@
         // path would wrongly stop the next vehicle in the same platoon for
         // no reason.
         const committedElsewhere = approachers.filter(
-          a => a.dist < STOPLINE_SETBACK && a.branchS !== naturalChoice.branchS
+          a => a.dist < stoplineSetback && a.branchS !== naturalChoice.branchS
         );
 
         if (committedElsewhere.length > 0) {
@@ -1534,12 +1548,13 @@
         }
       }
       for (const crossing of currentTrackDef.crossings) {
+        const stoplineSetback = (crossing.radius || CROSSING_RADIUS) + CAR_LENGTH;
         for (const stop of crossing.yieldStops) {
           if (stop.direction !== dir) continue;
           // Stop a little before the crossing's exact center, not on top of
           // it — otherwise a yielding vehicle's reference point comes to
           // rest right in the middle of the intersection instead of before it.
-          const setback = dir === 1 ? stop.branchS - STOPLINE_SETBACK : stop.branchS + STOPLINE_SETBACK;
+          const setback = dir === 1 ? stop.branchS - stoplineSetback : stop.branchS + stoplineSetback;
           const pos = ((setback % TRACK_LENGTH) + TRACK_LENGTH) % TRACK_LENGTH;
           entities.push({ kind: 'light', pos, speed: 0, length: 0 });
         }
@@ -2459,7 +2474,12 @@
         if (buildPoints[i].crossingIdx === ci && buildPoints[i].nodeIdx === 0) centerHits.push(controlArc[i]);
       }
       if (centerHits.length >= 2) {
-        crossings.push({ branches: [centerHits[0], centerHits[1]], occupant: null, yieldStops: [] });
+        crossings.push({
+          branches: [centerHits[0], centerHits[1]],
+          radius: pendingCrossings[ci].radius,
+          occupant: null,
+          yieldStops: []
+        });
       }
     }
 
@@ -2482,7 +2502,7 @@
         id,
         label: TRACKS[id].label,
         points: TRACKS[id].exportPoints ? TRACKS[id].exportPoints() : [],
-        crossings: (TRACKS[id].crossings || []).map(c => c.branches)
+        crossings: (TRACKS[id].crossings || []).map(c => ({ branches: c.branches, radius: c.radius }))
       }))
     };
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
@@ -2516,7 +2536,13 @@
           const id = 'custom-' + Date.now() + '-' + imported;
           const pointsCopy = t.points.map(p => ({ x: p.x, y: p.y }));
           const label = t.label || ('Geladene Strecke ' + customTrackCounter++);
-          const crossings = (t.crossings || []).map(branches => ({ branches, occupant: null, yieldStops: [] }));
+          const crossings = (t.crossings || []).map(c => {
+            // Backwards compatible with older exports that only stored the
+            // raw branches array without a radius.
+            const branches = Array.isArray(c) ? c : c.branches;
+            const radius = Array.isArray(c) ? CROSSING_RADIUS : (c.radius || CROSSING_RADIUS);
+            return { branches, radius, occupant: null, yieldStops: [] };
+          });
           TRACKS[id] = {
             label,
             crossings,
