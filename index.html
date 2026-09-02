@@ -491,6 +491,52 @@
     align-self: center;
   }
 
+  #script-input {
+    width: 100%;
+    box-sizing: border-box;
+    background: #0d1117;
+    color: var(--text);
+    border: 1px solid var(--panel-border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12.5px;
+    line-height: 1.5;
+    resize: vertical;
+  }
+  #script-input:focus-visible { outline: 2px solid var(--marking); outline-offset: 1px; }
+
+  .script-log {
+    margin: 8px 0 0;
+    max-height: 110px;
+    overflow-y: auto;
+    background: #0d1117;
+    border: 1px solid var(--panel-border);
+    border-radius: 8px;
+    padding: 8px 10px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11.5px;
+    color: var(--text-muted);
+    white-space: pre-wrap;
+  }
+  .script-log:empty::before {
+    content: 'Noch keine Ausgabe.';
+    color: var(--text-muted);
+    opacity: 0.6;
+  }
+  .script-log .log-error { color: var(--jam); }
+  .script-log .log-info { color: var(--free); }
+
+  #script-status {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    text-transform: none;
+    letter-spacing: normal;
+    color: var(--text-muted);
+  }
+  #script-status.running { color: var(--free); }
+  #script-status.error { color: var(--jam); }
+
   #parking-panel.drag-over {
     border-color: var(--marking);
     background: #1c1710;
@@ -642,8 +688,13 @@
         <button id="place-light-btn" class="place-btn">🚦 Ampel platzieren</button>
         <button id="place-priority-btn" class="place-btn">🔶 Vorfahrtsstraße platzieren</button>
         <button id="place-yield-btn" class="place-btn">🔻 Vorfahrt-achten platzieren</button>
+        <button id="place-zone-btn" class="place-btn">🏁 Tempolimit-Zone (2 Klicks)</button>
         <button id="clear-elements-btn" class="inspector-link" style="margin-top:2px;">Alle Elemente entfernen</button>
       </div>
+    </div>
+    <div class="control" style="flex: 1 1 200px;">
+      <label for="zone-limit-slider">Zonen-Tempolimit <span class="val" id="zone-limit-val">50 km/h</span></label>
+      <input type="range" id="zone-limit-slider" min="10" max="150" step="5" value="50">
     </div>
     <p class="element-hint" id="element-hint">
       Klicke auf die Straße, um zu platzieren — je nachdem, auf welcher Seite du klickst, wirkt das
@@ -651,9 +702,41 @@
       auf den Kreuzungsarm ein. Klicke ein vorhandenes Element an, um es zu entfernen. Außerhalb des
       Platzierungsmodus schaltet ein Klick auf eine Ampel sie zwischen Rot und Grün um. An einer Kreuzung
       erzwingt eine Vorfahrtsstraße freie Fahrt für ihre Seite, während Vorfahrt-achten-Schilder auf der
-      Gegenseite immer warten müssen; ohne Schilder gilt automatisch „wer zuerst da ist". Ein Fahrzeug lässt
-      sich zusätzlich anfassen und verschieben — die Straßenseite beim Loslassen bestimmt die
-      Fahrtrichtung.
+      Gegenseite immer warten müssen; ohne Schilder gilt automatisch „wer zuerst da ist". Für eine
+      Tempolimit-Zone zuerst das gewünschte Limit einstellen, dann Anfang und Ende des Abschnitts anklicken
+      — sie gilt für beide Fahrtrichtungen und wirkt sofort, auch auf einer bereits laufenden Simulation.
+      Um das Limit einer bestehenden Zone zu ändern, Regler auf den neuen Wert stellen und außerhalb des
+      Platzierungsmodus auf die Zone klicken.
+      Ein Fahrzeug lässt sich zusätzlich anfassen und verschieben — die Straßenseite beim Loslassen
+      bestimmt die Fahrtrichtung.
+    </p>
+  </div>
+
+  <div class="controls" id="script-panel">
+    <div class="control" style="flex: 1 1 100%;">
+      <label for="script-input">📜 Ampel-Skript <span class="val" id="script-status">gestoppt</span></label>
+      <textarea id="script-input" spellcheck="false" rows="8">// Alle Ampeln synchron alle 6 Sekunden umschalten:
+api.every(6, () => {
+  api.lights().forEach(light => api.toggleLight(light.index));
+});
+
+// Weitere Beispiele:
+// api.setLight(0, 'green');      // Ampel #0 (Reihenfolge = Platzierung) auf Grün
+// api.after(3, () => api.setLight(1, 'red'));  // einmalig nach 3s
+// api.log('Simzeit: ' + api.time.toFixed(0));  // eigene Meldungen im Log unten</textarea>
+      <div class="element-buttons" style="margin-top:8px;">
+        <button id="script-run-btn" class="place-btn">▶ Starten</button>
+        <button id="script-stop-btn" class="place-btn">⏹ Stoppen</button>
+        <button id="script-clear-log-btn" class="inspector-link">Log leeren</button>
+      </div>
+      <pre id="script-log" class="script-log"></pre>
+    </div>
+    <p class="element-hint" style="flex: 1 1 100%;">
+      Läuft direkt in Simulationszeit — bei höherer Simulationsgeschwindigkeit feuern <code>every</code>/<code>after</code>
+      entsprechend schneller. <code>api.lights()</code> liefert alle aktuell platzierten Ampeln mit Index (Reihenfolge der
+      Platzierung), Zustand und Seite. Ampeln lassen sich weiterhin auch manuell per Klick umschalten, unabhängig vom
+      Skript. Fehler im Code werden unten im Log angezeigt, ohne die Simulation zu unterbrechen. Streckenwechsel und
+      „Simulation neu starten" stoppen ein laufendes Skript automatisch.
     </p>
   </div>
 
@@ -1031,7 +1114,13 @@
   // entfernen" button.
   let trafficLights = [];   // { s: arc-length position, side, state: 'red' | 'green' }
   let yieldSigns = [];      // { s: arc-length position, side, type: 'priority' | 'yield' }
-  let placementMode = null; // null | 'light' | 'priority' | 'yield'
+  let speedZones = [];      // { start: arc-length, end: arc-length, limit: km/h } — applies to both directions
+  let pendingZoneStart = null; // arc-length of the first click while placing a new zone
+
+  // ---------- Live traffic-light scripting ----------
+  let scriptActive = false;
+  let scriptTimers = []; // { nextFireAt, intervalSec, fn, repeat }
+  let placementMode = null; // null | 'light' | 'priority' | 'yield' | 'speedzone'
 
   // ---------- Custom track building ----------
   let buildModeActive = false;
@@ -1069,6 +1158,18 @@
       const p = trackPoint(s);
       TRACK_SAMPLES.push({ s, x: p.x, y: p.y });
     }
+  }
+
+  // Plain nearest-point-on-track lookup, without the crossing-snap/offset
+  // behavior nearestTrackPos applies for signs and lights — a speed zone's
+  // boundary should sit exactly where clicked, not jump to a stop line.
+  function nearestPlainTrackPos(x, y) {
+    let best = null, bestDist = Infinity;
+    for (const sample of TRACK_SAMPLES) {
+      const d = Math.hypot(sample.x - x, sample.y - y);
+      if (d < bestDist) { bestDist = d; best = sample; }
+    }
+    return best ? best.s : null;
   }
 
   function nearestTrackPos(x, y) {
@@ -1147,6 +1248,7 @@
   }
 
   function switchTrack(trackId) {
+    stopScript();
     if (buildModeActive) {
       buildModeActive = false;
       buildPoints = [];
@@ -1161,8 +1263,10 @@
     rebuildTrackSamples();
     trafficLights = [];
     yieldSigns = [];
+    speedZones = [];
+    pendingZoneStart = null;
     placementMode = null;
-    for (const id of ['place-light-btn', 'place-priority-btn', 'place-yield-btn']) {
+    for (const id of ['place-light-btn', 'place-priority-btn', 'place-yield-btn', 'place-zone-btn']) {
       const btn = document.getElementById(id);
       if (btn) btn.classList.remove('active');
     }
@@ -1175,8 +1279,24 @@
     initSim(N, BASE_V0_KMH);
   }
 
+  // Returns the speed limit that actually applies at a given position: the
+  // most restrictive overlapping zone, or the global slider value as the
+  // default everywhere else. Works for both directions of travel equally —
+  // a zone marks a stretch of road, not a single lane.
+  function speedLimitAt(pos) {
+    let limit = BASE_V0_KMH;
+    for (const zone of speedZones) {
+      const within = zone.start <= zone.end
+        ? (pos >= zone.start && pos <= zone.end)
+        : (pos >= zone.start || pos <= zone.end); // zone wraps past the seam
+      if (within) limit = Math.min(limit, zone.limit);
+    }
+    return limit;
+  }
+
   function recomputeV0(v) {
-    v.v0 = Math.max(3, BASE_V0_KMH * v.v0Factor + v.v0DeltaKmh) / 3.6;
+    const limit = speedLimitAt(v.pos);
+    v.v0 = Math.max(3, limit * v.v0Factor + v.v0DeltaKmh) / 3.6;
   }
 
   // Keeps a spawn position safely clear of any crossing's actual stop line
@@ -1418,8 +1538,103 @@
     return Math.max(-8, Math.min(MAX_ACCEL_BOOSTED, accel));
   }
 
+  // ---------- Live traffic-light scripting engine ----------
+  // Scripts run against simulation time (simTime), not wall-clock time, so
+  // they automatically speed up/slow down together with the
+  // "Simulationsgeschwindigkeit" control instead of drifting out of sync.
+  function scriptLog(message, cls) {
+    const log = document.getElementById('script-log');
+    if (!log) return;
+    const line = document.createElement('div');
+    if (cls) line.className = cls;
+    line.textContent = '[' + simTime.toFixed(1) + 's] ' + message;
+    log.appendChild(line);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  function buildScriptApi() {
+    return {
+      get time() { return simTime; },
+      lights: () => trafficLights.map((l, i) => ({ index: i, state: l.state, side: l.side })),
+      setLight: (index, state) => {
+        if (!trafficLights[index]) return;
+        if (state !== 'red' && state !== 'green') return;
+        trafficLights[index].state = state;
+      },
+      toggleLight: (index) => {
+        if (!trafficLights[index]) return;
+        trafficLights[index].state = trafficLights[index].state === 'red' ? 'green' : 'red';
+      },
+      every: (seconds, fn) => {
+        scriptTimers.push({ nextFireAt: simTime + seconds, intervalSec: seconds, fn, repeat: true });
+      },
+      after: (seconds, fn) => {
+        scriptTimers.push({ nextFireAt: simTime + seconds, intervalSec: seconds, fn, repeat: false });
+      },
+      log: (message) => scriptLog(String(message), 'log-info')
+    };
+  }
+
+  function runScriptTimers() {
+    if (!scriptActive || scriptTimers.length === 0) return;
+    // Snapshot + filter so a timer's own callback pushing new timers (e.g.
+    // re-scheduling itself) doesn't get iterated over in the same pass.
+    const due = scriptTimers.filter(t => simTime >= t.nextFireAt);
+    if (due.length === 0) return;
+    scriptTimers = scriptTimers.filter(t => simTime < t.nextFireAt);
+    for (const t of due) {
+      try {
+        t.fn();
+      } catch (err) {
+        scriptLog('Fehler: ' + err.message, 'log-error');
+        stopScript();
+        return;
+      }
+      if (t.repeat) {
+        t.nextFireAt = simTime + t.intervalSec;
+        scriptTimers.push(t);
+      }
+    }
+  }
+
+  function setScriptStatus(text, cls) {
+    const el = document.getElementById('script-status');
+    if (!el) return;
+    el.textContent = text;
+    el.className = cls || '';
+  }
+
+  function stopScript() {
+    scriptActive = false;
+    scriptTimers = [];
+    setScriptStatus('gestoppt');
+  }
+
+  function startScript() {
+    stopScript();
+    const code = document.getElementById('script-input').value;
+    const api = buildScriptApi();
+    try {
+      const fn = new Function('api', code);
+      scriptActive = true;
+      fn(api);
+      setScriptStatus('läuft', 'running');
+      scriptLog('Skript gestartet.', 'log-info');
+    } catch (err) {
+      scriptActive = false;
+      setScriptStatus('Fehler', 'error');
+      scriptLog('Fehler: ' + err.message, 'log-error');
+    }
+  }
+
   function step(dt) {
     simTime += dt;
+
+    // Speed-zone limits depend on where each vehicle currently is, so this
+    // has to be re-checked every frame rather than only when the global
+    // slider or a manual override changes — driving into or out of a zone
+    // takes effect immediately as the vehicle crosses its boundary.
+    for (let i = 0; i < N; i++) recomputeV0(vehicles[i]);
 
     // Split into the two direction groups. Each group only ever follows
     // other members of its own group (its own lane) plus red lights placed
@@ -1460,6 +1675,32 @@
       return rank;
     }
 
+    // "Don't block the box": even a vehicle that would otherwise have the
+    // right of way shouldn't enter if there's nowhere for it to go once
+    // inside — that would leave it stuck in the intersection, blocking the
+    // cross traffic it just took priority over. This checks the *real*
+    // gap to whatever is actually ahead (another vehicle or a red light),
+    // ignoring the crossing's own virtual stop line, against how far the
+    // vehicle would have to travel to fully clear the box.
+    function hasRoomToClear(v, approachDist, radius) {
+      const needed = approachDist + radius * 2 + CAR_LENGTH;
+      let nearest = Infinity;
+      for (let j = 0; j < N; j++) {
+        const other = vehicles[j];
+        if (other === v || other.direction !== v.direction) continue;
+        let d = v.direction === 1 ? (other.pos - v.pos) : (v.pos - other.pos);
+        d = ((d % TRACK_LENGTH) + TRACK_LENGTH) % TRACK_LENGTH;
+        if (d > 0.01) nearest = Math.min(nearest, d - other.length);
+      }
+      for (const light of trafficLights) {
+        if (light.state !== 'red' || light.side !== v.direction) continue;
+        let d = v.direction === 1 ? (light.s - v.pos) : (v.pos - light.s);
+        d = ((d % TRACK_LENGTH) + TRACK_LENGTH) % TRACK_LENGTH;
+        if (d > 0.01) nearest = Math.min(nearest, d);
+      }
+      return nearest >= needed;
+    }
+
     for (const crossing of currentTrackDef.crossings) {
       // Every distance here scales with *this crossing's own* radius rather
       // than a fixed constant — a bigger (or smaller) crossing template
@@ -1489,35 +1730,49 @@
           let d = v.direction === 1 ? (branchS - v.pos) : (v.pos - branchS);
           d = ((d % TRACK_LENGTH) + TRACK_LENGTH) % TRACK_LENGTH;
           if (d < intersectionApproach) {
-            approachers.push({ idx: i, branchS, dist: d, direction: v.direction, rank: flowRank(branchS, v.direction) });
+            approachers.push({
+              idx: i, branchS, dist: d, direction: v.direction,
+              rank: flowRank(branchS, v.direction),
+              readyToEnter: hasRoomToClear(v, d, radius)
+            });
           }
         }
       }
 
       if (!crossing.occupant && approachers.length > 0) {
-        // Who would naturally win by rank/distance if nobody were already
-        // stuck too close to stop?
-        const maxRank = Math.max(...approachers.map(a => a.rank));
-        const eligible = approachers.filter(a => a.rank === maxRank);
-        eligible.sort((a, b) => a.dist - b.dist);
-        const naturalChoice = eligible[0];
+        // Who would naturally win by rank/distance, considering only
+        // vehicles that actually have room on the far side to clear the
+        // box — one that would just get stuck in the middle never wins
+        // this way, no matter how high its rank.
+        let naturalChoice = null;
+        const readyOnes = approachers.filter(a => a.readyToEnter);
+        if (readyOnes.length > 0) {
+          const maxRank = Math.max(...readyOnes.map(a => a.rank));
+          const eligible = readyOnes.filter(a => a.rank === maxRank);
+          eligible.sort((a, b) => a.dist - b.dist);
+          naturalChoice = eligible[0];
+        }
 
         // Only treat "already too close to stop" as an override when it
         // actually conflicts with a *different* branch that would otherwise
         // win — if every approacher is on the same branch anyway (no real
         // competing traffic), there's nothing to override, and forcing this
         // path would wrongly stop the next vehicle in the same platoon for
-        // no reason.
+        // no reason. A vehicle this committed gets forced through
+        // regardless of room ahead — it physically can no longer stop, so
+        // the box-blocking check doesn't apply to it either.
         const committedElsewhere = approachers.filter(
-          a => a.dist < stoplineSetback && a.branchS !== naturalChoice.branchS
+          a => a.dist < stoplineSetback && (!naturalChoice || a.branchS !== naturalChoice.branchS)
         );
 
         if (committedElsewhere.length > 0) {
           committedElsewhere.sort((a, b) => a.dist - b.dist);
           crossing.occupant = { idx: committedElsewhere[0].idx, branchS: committedElsewhere[0].branchS, forced: true };
-        } else {
+        } else if (naturalChoice) {
           crossing.occupant = { idx: naturalChoice.idx, branchS: naturalChoice.branchS, forced: false };
         }
+        // else: nobody can safely enter this frame — the crossing stays
+        // unclaimed and everyone currently approaching waits (see below).
       }
 
       // Normally, only cross-traffic from the *other* branch has to wait —
@@ -1525,12 +1780,12 @@
       // never actually cross paths with each other here, so once one of
       // them has claimed the crossing, its oncoming counterpart is free to
       // go too. But if the crossing was claimed as a forced safety
-      // exception for one specific committed vehicle, nobody else gets to
-      // ride along on that — everyone but that exact vehicle waits,
-      // including the rest of its own non-priority lane.
+      // exception for one specific committed vehicle, or if nobody could
+      // safely claim it at all this frame, nobody else gets to ride along —
+      // everyone but the exact occupant (if any) waits.
       crossing.yieldStops = approachers.filter(a => {
-        if (!crossing.occupant || a.idx === crossing.occupant.idx) return false;
-        if (crossing.occupant.forced) return true;
+        if (crossing.occupant && a.idx === crossing.occupant.idx) return false;
+        if (!crossing.occupant || crossing.occupant.forced) return true;
         return a.branchS !== crossing.occupant.branchS;
       });
     }
@@ -1783,6 +2038,44 @@
     ctx.stroke();
     ctx.setLineDash([]);
 
+    // speed-limit zones — a translucent tint over the affected stretch,
+    // plus a small badge at the midpoint showing the limit and doubling as
+    // the click target for removing it
+    for (const zone of speedZones) {
+      const span = ((zone.end - zone.start) % TRACK_LENGTH + TRACK_LENGTH) % TRACK_LENGTH;
+      const steps = Math.max(2, Math.ceil(span / 8));
+      ctx.beginPath();
+      for (let i = 0; i <= steps; i++) {
+        const ss = (zone.start + (span * i) / steps) % TRACK_LENGTH;
+        const p = trackPoint(ss);
+        if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y);
+      }
+      ctx.strokeStyle = 'rgba(139, 92, 246, 0.30)';
+      ctx.lineWidth = ROAD_WIDTH;
+      ctx.lineCap = 'butt';
+      ctx.stroke();
+      ctx.lineCap = 'round';
+
+      const midS = (zone.start + span / 2) % TRACK_LENGTH;
+      const mid = laneOffsetPoint(midS, ROADSIDE_OFFSET);
+      ctx.save();
+      ctx.translate(mid.x, mid.y);
+      ctx.fillStyle = '#8b5cf6';
+      ctx.strokeStyle = '#0b0f14';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      if (ctx.roundRect) ctx.roundRect(-16, -10, 32, 20, 4);
+      else ctx.rect(-16, -10, 32, 20);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 11px JetBrains Mono, monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(zone.limit, 0, 0);
+      ctx.restore();
+    }
+
     // vehicles — offset to the right-hand lane relative to their own
     // direction of travel (reversed vehicles render on the opposite lane).
     for (let i = 0; i < vehicles.length; i++) {
@@ -1967,6 +2260,8 @@
       step(dt * timeScale);
     }
 
+    runScriptTimers();
+
     draw();
     updateHud();
     updateInspector();
@@ -1995,7 +2290,19 @@
     timescaleVal.textContent = timeScale + '×';
   });
   resetBtn.addEventListener('click', () => {
+    stopScript();
     initSim(parseInt(countSlider.value, 10), parseInt(limitSlider.value, 10));
+  });
+
+  // ---------- Script panel buttons ----------
+  document.getElementById('script-run-btn').addEventListener('click', startScript);
+  document.getElementById('script-stop-btn').addEventListener('click', () => {
+    stopScript();
+    scriptLog('Skript gestoppt.', 'log-info');
+  });
+  document.getElementById('script-clear-log-btn').addEventListener('click', () => {
+    const log = document.getElementById('script-log');
+    if (log) log.innerHTML = '';
   });
 
   // ---------- Parking lot slider ----------
@@ -2288,6 +2595,34 @@
       return;
     }
 
+    if (placementMode === 'speedzone') {
+      // Clicking an existing zone's marker removes it.
+      const hitIdx = speedZones.findIndex(z => {
+        const mid = ((z.start + (((z.end - z.start) % TRACK_LENGTH + TRACK_LENGTH) % TRACK_LENGTH) / 2) % TRACK_LENGTH + TRACK_LENGTH) % TRACK_LENGTH;
+        const p = laneOffsetPoint(mid, ROADSIDE_OFFSET);
+        return Math.hypot(p.x - clickX, p.y - clickY) < 18;
+      });
+      if (hitIdx !== -1) {
+        speedZones.splice(hitIdx, 1);
+        pendingZoneStart = null;
+        return;
+      }
+
+      const s = nearestPlainTrackPos(clickX, clickY);
+      if (s === null) return;
+
+      if (pendingZoneStart === null) {
+        pendingZoneStart = s;
+      } else {
+        const limit = parseInt(zoneLimitSlider.value, 10);
+        if (Math.abs(s - pendingZoneStart) > 1) {
+          speedZones.push({ start: pendingZoneStart, end: s, limit });
+        }
+        pendingZoneStart = null;
+      }
+      return;
+    }
+
     if (placementMode === 'light') {
       const hitIdx = hitTestList(trafficLights, clickX, clickY, 16);
       if (hitIdx !== -1) {
@@ -2323,6 +2658,20 @@
     const signIdx = hitTestList(yieldSigns, clickX, clickY, 16);
     if (signIdx !== -1) return;
 
+    // Clicking an existing speed-limit zone applies whatever the slider is
+    // currently set to as its new limit — set the slider first, then click
+    // the zone you want to change.
+    const zoneIdx = speedZones.findIndex(z => {
+      const span = ((z.end - z.start) % TRACK_LENGTH + TRACK_LENGTH) % TRACK_LENGTH;
+      const mid = (z.start + span / 2) % TRACK_LENGTH;
+      const p = laneOffsetPoint(mid, ROADSIDE_OFFSET);
+      return Math.hypot(p.x - clickX, p.y - clickY) < 18;
+    });
+    if (zoneIdx !== -1) {
+      speedZones[zoneIdx].limit = parseInt(zoneLimitSlider.value, 10);
+      return;
+    }
+
     // Otherwise, select the nearest vehicle (each on its own lane side).
     const nearest = vehicleHitTest(clickX, clickY, 26);
     selectedIndex = nearest !== -1 ? nearest : null;
@@ -2333,23 +2682,35 @@
   const placeLightBtn = document.getElementById('place-light-btn');
   const placePriorityBtn = document.getElementById('place-priority-btn');
   const placeYieldBtn = document.getElementById('place-yield-btn');
+  const placeZoneBtn = document.getElementById('place-zone-btn');
   const placementButtons = [
     { mode: 'light', btn: placeLightBtn },
     { mode: 'priority', btn: placePriorityBtn },
-    { mode: 'yield', btn: placeYieldBtn }
+    { mode: 'yield', btn: placeYieldBtn },
+    { mode: 'speedzone', btn: placeZoneBtn }
   ];
 
   function setPlacementMode(mode) {
     placementMode = placementMode === mode ? null : mode;
+    pendingZoneStart = null;
     for (const p of placementButtons) p.btn.classList.toggle('active', placementMode === p.mode);
   }
   placeLightBtn.addEventListener('click', () => setPlacementMode('light'));
   placePriorityBtn.addEventListener('click', () => setPlacementMode('priority'));
   placeYieldBtn.addEventListener('click', () => setPlacementMode('yield'));
+  placeZoneBtn.addEventListener('click', () => setPlacementMode('speedzone'));
+
+  const zoneLimitSlider = document.getElementById('zone-limit-slider');
+  const zoneLimitVal = document.getElementById('zone-limit-val');
+  zoneLimitSlider.addEventListener('input', () => {
+    zoneLimitVal.textContent = zoneLimitSlider.value + ' km/h';
+  });
 
   document.getElementById('clear-elements-btn').addEventListener('click', () => {
     trafficLights = [];
     yieldSigns = [];
+    speedZones = [];
+    pendingZoneStart = null;
     // Only clear manually placed crossings on custom tracks — the figure-8's
     // automatic intersection isn't something the person placed, so it
     // shouldn't disappear here (it comes back on its own via a track switch anyway).
